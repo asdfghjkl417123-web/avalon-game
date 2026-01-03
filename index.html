@@ -1,0 +1,1397 @@
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AVALON: Realtime Command</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getDatabase, ref, set, onValue, update, remove } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+
+        // ★ここにFirebaseの構成（Config）を貼り付けてください
+        const firebaseConfig = {
+            apiKey: "AIzaSyC1Y1Cx3eiweokQyKCZ5c_PfBx5txi9Omk",
+            authDomain: "avalon-game-a986b.firebaseapp.com",
+            databaseURL: "https://avalon-game-a986b-default-rtdb.firebaseio.com",
+            projectId: "avalon-game-a986b",
+            storageBucket: "avalon-game-a986b.firebasestorage.app",
+            messagingSenderId: "586338781550",
+            appId: "1:586338781550:web:deeb0ce69c32ea8af8597f",
+            measurementId: "G-3SD3DQVD2V"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
+
+        // Reactから使えるようにグローバルに公開
+        window.fb = { db, ref, set, onValue, update, remove };
+    </script>
+
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@700&family=Noto+Sans+JP:wght@400;700&display=swap"
+        rel="stylesheet">
+    <style>
+        @keyframes cardReveal {
+            0% {
+                transform: scale(0.8) rotateY(90deg);
+                opacity: 0;
+            }
+
+            100% {
+                transform: scale(1) rotateY(0deg);
+                opacity: 1;
+            }
+        }
+
+        /* 敗北時の画面の揺れ演出 */
+        @keyframes shake {
+            0% {
+                transform: translate(1px, 1px) rotate(0deg);
+            }
+
+            10% {
+                transform: translate(-1px, -2px) rotate(-1deg);
+            }
+
+            20% {
+                transform: translate(-3px, 0px) rotate(1deg);
+            }
+
+            30% {
+                transform: translate(3px, 2px) rotate(0deg);
+            }
+
+            40% {
+                transform: translate(1px, -1px) rotate(1deg);
+            }
+
+            50% {
+                transform: translate(-1px, 2px) rotate(-1deg);
+            }
+
+            100% {
+                transform: translate(1px, 1px) rotate(0deg);
+            }
+        }
+
+        @keyframes loading {
+            0% {
+                transform: translateX(-100%);
+            }
+
+            80% {
+                transform: translateX(-10%);
+            }
+
+            /* 最後に少し溜める */
+            100% {
+                transform: translateX(0);
+            }
+        }
+
+        .animate-revealIdentity {
+            animation: reveal 0.8s cubic-bezier(0.23, 1, 0.32, 1) both;
+        }
+
+        @keyframes reveal {
+            0% {
+                letter-spacing: 1em;
+                opacity: 0;
+                filter: blur(10px);
+            }
+
+            100% {
+                letter-spacing: normal;
+                opacity: 1;
+                filter: blur(0);
+            }
+        }
+
+        @keyframes shimmer {
+            0% {
+                transform: translateX(-100%) rotate(35deg);
+            }
+
+            100% {
+                transform: translateX(100%) rotate(35deg);
+            }
+        }
+
+        /* 成功・失敗時のグロー（発光）エフェクト */
+        .text-success-glow {
+            color: #60a5fa;
+            text-shadow: 0 0 10px #3b82f6, 0 0 20px #2563eb;
+        }
+
+        .text-fail-glow {
+            color: #f87171;
+            text-shadow: 0 0 10px #ef4444, 0 0 20px #dc2626;
+        }
+
+        .animate-shake {
+            animation: shake 0.5s linear infinite;
+        }
+
+        .animate-cardReveal {
+            animation: cardReveal 0.8s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+        }
+
+        body {
+            background-color: #0d0d0f;
+            color: #e2d1a4;
+            font-family: 'Noto Sans JP', sans-serif;
+            overflow-x: hidden;
+        }
+
+        .font-cinzel {
+            font-family: 'Cinzel', serif;
+        }
+
+        .gold-border {
+            border: 1px solid #c5a059;
+        }
+
+        .gold-text {
+            color: #c5a059;
+        }
+
+        .bg-dark-card {
+            background-color: #1a1a1e;
+            border: 1px solid #333;
+        }
+
+        .btn-gold {
+            background: linear-gradient(135deg, #c5a059 0%, #8e6d2f 100%);
+            color: black;
+            font-weight: bold;
+        }
+
+        .btn-gold:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
+
+        /* アニメーション */
+        .fade-in {
+            animation: fadeIn 0.5s ease-out forwards;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo } = React;
+
+        const QUEST_CONFIG = {
+            5: [2, 3, 2, 3, 3], 6: [2, 3, 4, 3, 4], 7: [2, 3, 3, 4, 4],
+            8: [3, 4, 4, 5, 5], 9: [3, 4, 4, 5, 5], 10: [3, 4, 4, 5, 5]
+        };
+
+        const ROLE_HELP = {
+            'マーリン': "【正義】邪悪な陣営（モードレッドを除く）の正体を知っています。最後に暗殺者に正体を見破られると敗北します。",
+            'パーシヴァル': "【正義】マーリンとモルガナの2名が「マーリン候補」として見えています。どちらが本物か見極めてください。",
+            '忠臣': "【正義】特別な能力はありません。議論と投票で正義を勝利に導いてください。",
+            '暗殺者': "【邪悪】仲間の正体を知っています。ゲーム終了時、マーリンを指名して暗殺に成功すれば逆転勝利となります。",
+            'モルガナ': "【邪悪】仲間の正体を知っています。パーシヴァルに対してマーリンのふりをして表示されます。",
+            'モードレッド': "【邪悪】仲間の正体を知っています。マーリンの目から逃れることができる強力な役職です。",
+            'オベロン': "【邪悪】仲間から認識されず、自分も仲間を知りません。しかし、邪悪な陣営の一員として動きます。"
+        };
+
+        function App() {
+            const [roomCode, setRoomCode] = useState(localStorage.getItem('avalon_room') || "");
+            const [myName, setMyName] = useState(localStorage.getItem('avalon_name') || "");
+            const [isJoined, setIsJoined] = useState(false);
+            const [gameState, setGameState] = useState(null);
+            const [selectedPlayers, setSelectedPlayers] = useState([]);
+            const [hasActioned, setHasActioned] = useState(false);
+            const [showHistoryModal, setShowHistoryModal] = React.useState(false); // 履歴画面の開閉
+            const [showHelp, setShowHelp] = React.useState(false);                 // 役職ヘルプの開閉
+            const [revealing, setRevealing] = React.useState(false);               // 演出中かどうかのフラグ
+            const [displayResults, setDisplayResults] = React.useState([]);
+            const [historyTab, setHistoryTab] = React.useState('quest'); // 'quest' か 'vote'
+            const [isRevealingRole, setIsRevealingRole] = React.useState(false);
+            const [isRevealingAssassination, setIsRevealingAssassination] = React.useState(false);
+            const [isRevealingVote, setIsRevealingVote] = React.useState(false);
+            const [lastVoteStatus, setLastVoteStatus] = React.useState(null); // 'approved' or 'rejected'
+            const [isAssassinating, setIsAssassinating] = React.useState(false); // 演出実行中
+            const [isMatchPointPerforming, setIsMatchPointPerforming] = React.useState(false);
+            const [wantsRematch, setWantsRematch] = React.useState(false);
+
+            // ホスト（プレイヤーリストの1番目）かどうかを判定
+            const isHost = gameState?.playerList?.[0] === myName;
+
+            // GM専用：次のフェーズへ進める関数
+const advancePhase = () => {
+                if (!isHost || !gameState) return;
+
+                // ① 全員投票後（承認/却下）の進行
+                if (gameState.phase === 'vote') {
+                    const votesArray = Object.values(gameState.votes || {});
+                    if (votesArray.length === gameState.playerList.length) {
+                        const approves = votesArray.filter(v => v === 'approve').length;
+                        const isApproved = approves > gameState.playerList.length / 2;
+
+                        // 履歴データを作成
+                        const newVoteEntry = {
+                            quest: gameState.currentQuest,
+                            count: gameState.voteCount,
+                            leader: gameState.currentLeader,
+                            team: gameState.proposedTeam,
+                            approved: isApproved,
+                            details: Object.entries(gameState.votes)
+                                .map(([name, v]) => `${name}:${v === 'approve' ? '○' : '×'}`)
+                                .join("  ")
+                        };
+                        const newVoteHistory = [...(gameState.voteHistory || []), newVoteEntry];
+
+                        if (isApproved) {
+                            dbUpdate({ 
+                                phase: 'quest', 
+                                isVoteConfirmed: true, 
+                                voteHistory: newVoteHistory 
+                            });
+                        } else {
+                            const nextLeaderIdx = (gameState.playerList.indexOf(gameState.currentLeader) + 1) % gameState.playerList.length;
+                            dbUpdate({
+                                phase: 'propose',
+                                voteCount: (gameState.voteCount || 0) + 1,
+                                currentLeader: gameState.playerList[nextLeaderIdx],
+                                votes: {},
+                                proposedTeam: [],
+                                isVoteConfirmed: false,
+                                voteHistory: newVoteHistory
+                            });
+                        }
+                    }
+                }
+                // ② 遠征結果（成功/失敗）表示後の進行
+                else if (gameState.phase === 'quest' && gameState.tempResults) {
+                    const failCount = gameState.tempResults.filter(r => r === 'fail').length;
+                    const requiredFails = (gameState.currentQuest === 4 && gameState.playerList.length >= 7) ? 2 : 1;
+                    const isSuccess = failCount < requiredFails;
+                    const newResults = [...(gameState.questResults || []), isSuccess ? 'success' : 'fail'];
+
+                    // 遠征履歴を作成
+                    const newQuestEntry = {
+                        team: gameState.proposedTeam,
+                        result: isSuccess ? 'success' : 'fail',
+                        details: `FAILS: ${failCount}`
+                    };
+                    const newQuestHistory = [...(gameState.questHistory || []), newQuestEntry];
+
+                    const goodWins = newResults.filter(r => r === 'success').length;
+                    const evilWins = newResults.filter(r => r === 'fail').length;
+
+                    if (goodWins === 3) {
+                        dbUpdate({ phase: 'assassination', questResults: newResults, questHistory: newQuestHistory, tempResults: null });
+                    } else if (evilWins === 3) {
+                        dbUpdate({ phase: 'end', winner: 'EVIL', questResults: newResults, questHistory: newQuestHistory, tempResults: null, shownRoles: {} }); // フラグリセット
+                    } else {
+                        const nextLeaderIdx = (gameState.playerList.indexOf(gameState.currentLeader) + 1) % gameState.playerList.length;
+                        dbUpdate({
+                            phase: 'propose',
+                            currentQuest: gameState.currentQuest + 1,
+                            questResults: newResults,
+                            questHistory: newQuestHistory,
+                            currentLeader: gameState.playerList[nextLeaderIdx],
+                            voteCount: 1,
+                            tempResults: null,
+                            questData: {}
+                        });
+                    }
+                }
+                // ③ 暗殺ターゲット選択後の進行
+                else if (gameState.phase === 'assassination' && gameState.assassinTarget) {
+                    const isMerlin = gameState.playerMap[gameState.assassinTarget] === 'マーリン';
+                    // ゲーム終了時に確認フラグをリセットしておく（次のゲームのため）
+                    dbUpdate({ 
+                        phase: 'end', 
+                        winner: isMerlin ? 'EVIL' : 'GOOD',
+                        shownRoles: {} // ★重要：ここを空にすることで次回の役職表示が全員に出るようになる
+                    });
+                }
+            };
+            // DBの変更を監視して演出を開始するuseEffect
+            // 1. データのリアルタイム監視（参加者更新・フェーズ進行に必須）
+            useEffect(() => {
+                if (!roomCode || !isJoined) return;
+                const roomRef = window.fb.ref(window.fb.db, `rooms/${roomCode}`);
+
+                const unsubscribe = window.fb.onValue(roomRef, (snapshot) => {
+                    const data = snapshot.val();
+                    if (data) {
+                        setGameState(data);
+                    }
+                });
+                return () => unsubscribe();
+            }, [roomCode, isJoined]);
+
+            // 追加：ゲーム開始（役職配布）を全員の画面で検知して演出を開始する
+            useEffect(() => {
+                // 1. ゲームが開始(started: true)された
+                // 2. まだ演出を表示していない(isRevealingRoleがfalse)
+                if (gameState?.started && !isRevealingRole) {
+                    // セッションストレージを使って、リロード時に何度も出ないように制御
+                    const hasSeen = sessionStorage.getItem(`revealed_${roomCode}`);
+                    if (!hasSeen) {
+                        setIsRevealingRole(true);
+                        sessionStorage.setItem(`revealed_${roomCode}`, 'true');
+                    }
+                }
+            }, [gameState?.started]);
+
+            // --- 追加：投票結果を全員の画面で一斉に出す ---
+            useEffect(() => {
+                // lastVoteId が更新されたら、その時の status を取得して演出を開始
+                if (gameState?.lastVoteId && gameState?.lastVoteStatus) {
+                    setLastVoteStatus(gameState.lastVoteStatus);
+                    setIsRevealingVote(true);
+
+                    const timer = setTimeout(() => {
+                        setIsRevealingVote(false);
+                    }, 2500);
+
+                    return () => clearTimeout(timer);
+                }
+            }, [gameState?.lastVoteId]); // lastVoteId の変化を監視
+
+            // 3. 次のフェーズに進んだらボタンを再び押せるようにする
+            useEffect(() => {
+                setHasActioned(false);
+            }, [gameState?.phase, gameState?.voteCount, gameState?.currentQuest]);
+
+            // ② 遠征結果演出の同期
+            useEffect(() => {
+                // tempResultsが存在し、かつ「激アツ演出中」でない時だけカードをめくり始める
+                if (gameState?.tempResults && !revealing && !gameState?.isQuestPerforming) {
+                    startRevealSequence(gameState.tempResults);
+                }
+            }, [gameState?.tempResults, gameState?.isQuestPerforming]);
+
+            // マッチポイント演出の監視
+            useEffect(() => {
+                setIsMatchPointPerforming(!!gameState?.isQuestPerforming);
+            }, [gameState?.isQuestPerforming]);
+
+            // 暗殺開始と最終結果の演出トリガー
+            useEffect(() => {
+                if (gameState?.phase === 'assassination') {
+                    setIsRevealingAssassination(true);
+                    // 3秒後に演出を閉じ、暗殺者の操作画面を出す
+                    const timer = setTimeout(() => setIsRevealingAssassination(false), 3000);
+                    return () => clearTimeout(timer);
+                }
+            }, [gameState?.phase]);
+
+            useEffect(() => {
+                if (gameState?.isAssassinationPerforming) {
+                    setIsAssassinating(true);
+                    // 音声を出すならここ（ジャジャーン！というSEなど）
+                } else {
+                    setIsAssassinating(false);
+                }
+            }, [gameState?.isAssassinationPerforming]);
+
+            // 演出の中身（startRevealSequence）
+            const startRevealSequence = (resultsArray) => {
+                setRevealing(true);
+                let currentShown = [];
+
+                resultsArray.forEach((res, index) => {
+                    setTimeout(() => {
+                        currentShown.push(res);
+                        setDisplayResults([...currentShown]);
+
+                        if (currentShown.length === resultsArray.length) {
+                            setTimeout(() => {
+                                setRevealing(false);
+                                setDisplayResults([]);
+                                // リーダーのみが一度だけDBを更新して次のフェーズへ送る
+                                if (gameState.currentLeader === myName) {
+                                    finishQuestLogic(resultsArray);
+                                }
+                            }, 2000);
+                        }
+                    }, (index + 1) * 1000);
+                });
+            };
+
+            const finishQuestLogic = (resultsArray) => {
+                const fails = resultsArray.filter(v => v === 'fail').length;
+                const isQ4Special = (gameState.currentQuest === 4 && gameState.playerList.length >= 7);
+                const success = isQ4Special ? fails < 2 : fails < 1;
+
+                const newResults = [...(gameState.questResults || []), success ? 'success' : 'fail'];
+                const newHistoryEntry = {
+                    team: [...gameState.proposedTeam],
+                    result: success ? 'success' : 'fail',
+                    details: resultsArray.map(r => r === 'success' ? '○' : '×').join(" ")
+                };
+                const updatedHistory = [...(gameState.questHistory || []), newHistoryEntry];
+                const nextLeaderIdx = (gameState.playerList.indexOf(gameState.currentLeader) + 1) % gameState.playerList.length;
+
+                let nextPhase = 'propose';
+                let winner = null;
+
+
+                if (newResults.filter(r => r === 'fail').length >= 3) {
+                    nextPhase = 'end';
+                    winner = 'EVIL';
+                } else if (newResults.filter(r => r === 'success').length >= 3) {
+                    nextPhase = 'assassination';
+                }
+
+                dbUpdate({
+                    phase: nextPhase,
+                    winner: winner,
+                    currentQuest: nextPhase === 'propose' ? gameState.currentQuest + 1 : gameState.currentQuest,
+                    currentLeader: gameState.playerList[nextLeaderIdx],
+                    questResults: newResults,
+                    questHistory: updatedHistory,
+                    tempResults: null, // 演出用データを消去
+                    questData: {},     // 提出データをリセット
+                    voteCount: 0,
+                    logs: addLog(`第${gameState.currentQuest}遠征結果: ${success ? "成功" : "失敗"} [${newHistoryEntry.details}]`)
+                });
+            };
+
+            const dbUpdate = (updates) => {
+                const roomRef = window.fb.ref(window.fb.db, `rooms/${roomCode}`);
+                window.fb.update(roomRef, updates);
+            };
+
+            const addLog = (msg) => {
+                const currentLogs = gameState?.logs || [];
+                return [...currentLogs, `[${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}] ${msg}`].slice(-20);
+            };
+
+            const joinGame = () => {
+                if (!roomCode || !myName) return alert("入力してください");
+                localStorage.setItem('avalon_room', roomCode);
+                localStorage.setItem('avalon_name', myName);
+                setIsJoined(true);
+                const playersRef = window.fb.ref(window.fb.db, `rooms/${roomCode}/players/${myName}`);
+                window.fb.set(playersRef, { joined: true });
+            };
+
+            const startGame = () => {
+                const players = Object.keys(gameState.players);
+                if (players.length < 5) return alert("5人以上必要です");
+
+                // 安全な役職配布ロジック
+                let baseRoles = ['マーリン', 'パーシヴァル', '忠臣', '暗殺者', 'モルガナ'];
+                if (players.length >= 6) baseRoles.push('忠臣');
+                if (players.length >= 7) baseRoles.push('モードレッド');
+                if (players.length >= 8) baseRoles.push('忠臣');
+                if (players.length >= 9) baseRoles.push('忠臣');
+                if (players.length >= 10) baseRoles.push('オベロン');
+
+                const shuffled = baseRoles.sort(() => Math.random() - 0.5);
+                const playerMap = {};
+                players.forEach((p, i) => { playerMap[p] = shuffled[i]; });
+
+                dbUpdate({
+                    started: true,
+                    phase: 'propose',
+                    playerMap,
+                    playerList: players,
+                    currentLeader: players[0],
+                    currentQuest: 1,
+                    voteCount: 0,
+                    questResults: [],
+                    logs: [`[${new Date().toLocaleTimeString()}] 聖戦が開始されました`]
+                });
+                setIsRevealingRole(true);
+            };
+
+            // 特殊情報の取得ロジック
+            const getSeenInfo = () => {
+                if (!gameState || !gameState.playerMap) return null;
+                const myRole = gameState.playerMap[myName];
+                const info = [];
+                const evilRoles = ['暗殺者', 'モルガナ', 'モードレッド', 'オベロン'];
+                const seenByMerlin = ['暗殺者', 'モルガナ', 'オベロン'];
+
+                Object.entries(gameState.playerMap).forEach(([name, role]) => {
+                    if (name === myName) return;
+                    if (myRole === 'マーリン' && seenByMerlin.includes(role)) info.push(`${name}: 邪悪`);
+                    if (myRole === 'パーシヴァル' && ['マーリン', 'モルガナ'].includes(role)) info.push(`${name}: マーリン候補`);
+                    if (['暗殺者', 'モルガナ', 'モードレッド'].includes(myRole) && ['暗殺者', 'モルガナ', 'モードレッド'].includes(role)) info.push(`${name}: 仲間`);
+                });
+                return info;
+            };
+
+            const proposeTeam = () => {
+                dbUpdate({
+                    phase: 'voting',
+                    proposedTeam: selectedPlayers,
+                    votes: {},
+                    logs: addLog(`${myName}が遠征メンバーを提案: ${selectedPlayers.join(", ")}`)
+                });
+                setSelectedPlayers([]);
+            };
+
+            // 投票（承認・却下）の修正
+            const castVote = (choice) => {
+                if (hasActioned) return;
+                setHasActioned(true);
+
+                const newVotes = { ...(gameState.votes || {}), [myName]: choice };
+
+                // 全員の投票が揃ったかチェック
+                if (Object.keys(newVotes).length === gameState.playerList.length) {
+                    const yesCount = Object.values(newVotes).filter(v => v === 'yes').length;
+                    const approved = yesCount > gameState.playerList.length / 2;
+
+                    // 投票詳細の文字列（履歴表示用）
+                    const voteDetails = Object.entries(newVotes)
+                        .map(([name, v]) => `${name}:${v === 'yes' ? '○' : '×'}`)
+                        .join("  ");
+
+                    const newVoteRecord = {
+                        quest: gameState.currentQuest,
+                        count: (gameState.voteCount || 0) + 1,
+                        leader: gameState.currentLeader,
+                        team: [...gameState.proposedTeam],
+                        details: voteDetails,
+                        approved: approved
+                    };
+                    const updatedVoteHistory = [...(gameState.voteHistory || []), newVoteRecord];
+
+                    // --- 全員一斉演出のための同期用データ ---
+                    const syncStatus = approved ? 'approved' : 'rejected'; // 文字列を固定
+                    const syncId = Date.now();
+
+                    const baseUpdate = {
+                        votes: {}, // 次回のために投票をクリア
+                        lastVoteStatus: syncStatus, // 演出判定用の文字列
+                        lastVoteId: syncId,         // useEffect発火用のトリガー
+                        lastVoteResult: voteDetails, // 詳細表示用
+                        voteHistory: updatedVoteHistory,
+                    };
+
+                    if (approved) {
+                        dbUpdate({
+                            ...baseUpdate,
+                            phase: 'quest',
+                            questData: {},
+                            actions: {},
+                            logs: addLog(`提案承認 (${yesCount}票)。遠征へ。`)
+                        });
+                    } else {
+                        const idx = (gameState.playerList.indexOf(gameState.currentLeader) + 1) % gameState.playerList.length;
+                        const count = (gameState.voteCount || 0) + 1;
+                        dbUpdate({
+                            ...baseUpdate,
+                            phase: count >= 5 ? 'end' : 'propose',
+                            winner: count >= 5 ? 'EVIL' : null,
+                            currentLeader: gameState.playerList[idx],
+                            voteCount: count >= 5 ? 0 : count,
+                            logs: addLog(count >= 5 ? "5回却下により邪悪の勝利" : `提案却下。リーダー交代`)
+                        });
+                    }
+                } else {
+                    dbUpdate({ votes: newVotes });
+                }
+            };
+
+            const questAction = (choice) => {
+                if (hasActioned) return;
+                setHasActioned(true);
+
+                const myRole = gameState.playerMap[myName];
+                const isEvil = ['暗殺者', 'モルガナ', 'モードレッド', 'オベロン'].includes(myRole);
+                const finalChoice = isEvil ? choice : 'success';
+
+                const newData = { ...(gameState.questData || {}), [myName]: finalChoice };
+                const team = gameState.proposedTeam;
+
+                if (Object.keys(newData).length === team.length) {
+                    const shuffledResults = Object.values(newData).sort(() => Math.random() - 0.5);
+
+                    // マッチポイント判定（どちらかが2勝している）
+                    const goodWins = (gameState.questResults || []).filter(r => r === 'success').length;
+                    const evilWins = (gameState.questResults || []).filter(r => r === 'fail').length;
+                    const isMatchPoint = (goodWins === 2 || evilWins === 2);
+
+                    if (isMatchPoint) {
+                        // ① まず「激アツ演出」フラグだけを立てる
+                        dbUpdate({
+                            questData: newData,
+                            isQuestPerforming: true,
+                            questPerformingId: Date.now()
+                        });
+
+                        // ② 6秒後に「激アツ演出」を消し、同時に「カードめくりデータ」を投入
+                        setTimeout(() => {
+                            dbUpdate({
+                                isQuestPerforming: false,
+                                tempResults: shuffledResults // ここで初めてカードが並び始める
+                            });
+                        }, 6000);
+                    } else {
+                        // 通常時は即座にカードめくりへ
+                        dbUpdate({
+                            questData: newData,
+                            tempResults: shuffledResults
+                        });
+                    }
+                } else {
+                    dbUpdate({ questData: newData });
+                }
+            };
+
+            const assassinate = (target) => {
+                const targetRole = gameState.playerMap[target];
+                if (targetRole === 'マーリン') dbUpdate({ phase: 'end', winner: 'EVIL', logs: addLog(`暗殺成功！マーリン(${target})は倒れました。邪悪の勝利！`) });
+                else dbUpdate({ phase: 'end', winner: 'GOOD', logs: addLog(`暗殺失敗！${target}はマーリンではありませんでした。正義の勝利！`) });
+            };
+
+            const handleReset = () => {
+                setWantsRematch(false); // 追加
+                setHasActioned(false);  // 追加
+                if (confirm("リセットしますか？")) {
+                    // 次回ゲーム時にまた演出が見れるようにフラグを消す
+                    sessionStorage.removeItem(`revealed_${roomCode}`);
+                    window.fb.remove(window.fb.ref(window.fb.db, `rooms/${roomCode}`));
+                    location.reload();
+                }
+            };
+
+            const executeAssassination = (targetName) => {
+                const isMerlin = gameState.playerMap[targetName] === 'マーリン';
+
+                dbUpdate({
+                    assassinationTarget: targetName,
+                    isAssassinationPerforming: true,
+                    assassinationId: Date.now()
+                });
+
+                setTimeout(() => {
+                    dbUpdate({
+                        phase: 'end',
+                        winner: isMerlin ? 'EVIL' : 'GOOD',
+                        isAssassinationPerforming: false,
+                        logs: addLog(isMerlin ? `暗殺成功！マーリンは${targetName}だった。` : `暗殺失敗！${targetName}はマーリンではなかった。`)
+                    });
+                }, 5000);
+            };
+
+            const handleRematch = () => {
+                if (!gameState || wantsRematch) return;
+
+                // 自分のボタンを「待機中」に変える
+                setWantsRematch(true);
+                // 重要：次のゲームで「すでにアクション済み」判定にならないようにリセット
+                setHasActioned(false);
+
+                const newRematchVotes = { ...(gameState.rematchVotes || {}), [myName]: true };
+
+                if (Object.keys(newRematchVotes).length === gameState.playerList.length) {
+                    dbUpdate({
+                        started: false,
+                        phase: 'propose',
+                        currentQuest: 1,
+                        voteCount: 1, // 初期値を1に設定
+                        questResults: [],
+                        playerMap: {},
+                        votes: {},
+                        questData: {},
+                        tempResults: null,
+                        rematchVotes: {}, // 全員の再戦希望をリセット
+                        logs: addLog("=== 新しいゲームが開始されます ===")
+                    });
+                } else {
+                    dbUpdate({ rematchVotes: newRematchVotes });
+                }
+            };
+
+            if (!isJoined) return (
+                <div className="flex flex-col items-center justify-center h-screen space-y-8 fade-in">
+                    <h1 className="text-6xl font-cinzel gold-text tracking-widest drop-shadow-lg">AVALON</h1>
+                    <div className="bg-dark-card p-8 rounded-lg gold-border w-80 space-y-4 shadow-2xl">
+                        <input className="w-full bg-black border border-gray-700 p-3 rounded" placeholder="ROOM CODE" value={roomCode} onChange={e => setRoomCode(e.target.value)} />
+                        <input className="w-full bg-black border border-gray-700 p-3 rounded" placeholder="YOUR NAME" value={myName} onChange={e => setMyName(e.target.value)} />
+                        <button onClick={joinGame} className="w-full btn-gold py-3 rounded hover:brightness-125 transition-all">ENTER GAME</button>
+                    </div>
+                </div>
+            );
+
+            const seenInfo = getSeenInfo();
+
+            return (
+                <div className="max-w-md mx-auto p-4 space-y-4 fade-in">
+                    <header className="flex justify-between items-center border-b border-[#c5a059] pb-2">
+                        <div className="font-cinzel text-xl gold-text tracking-tighter">AVALON COMMAND</div>
+                        <button onClick={handleReset} className="text-[10px] text-red-500 border border-red-900 px-2 py-1 rounded">RESET</button>
+                    </header>
+
+                    {!gameState?.started ? (
+                        <div className="bg-dark-card p-6 rounded-lg text-center space-y-4">
+                            <p className="text-sm">
+                                参加者: {gameState && gameState.players ? Object.keys(gameState.players).join(", ") : myName}
+                            </p>
+                            <button onClick={startGame} className="w-full btn-gold py-3 rounded shadow-lg">GAME START</button>
+                        </div>
+                    ) : (
+                        <div className="space-y-4">
+
+                            {/* 役職・特殊情報エリア */}
+                            <div className="bg-dark-card p-4 rounded-lg gold-border flex justify-between items-start relative">
+                                <div>
+                                    <div className="flex items-center gap-2 mb-1">
+                                        <h3 className="text-[10px] uppercase opacity-50 tracking-widest leading-none">Your Role</h3>
+                                        <button
+                                            onClick={() => setShowHelp(true)}
+                                            className="w-4 h-4 rounded-full border border-gold/50 text-[10px] flex items-center justify-center text-gold hover:bg-gold/20 transition-all"
+                                        >
+                                            ?
+                                        </button>
+                                    </div>
+                                    <p className="text-2xl font-cinzel text-white leading-none">{gameState.playerMap?.[myName]}</p>
+                                </div>
+
+                                {seenInfo && seenInfo.length > 0 && (
+                                    <div className="text-[10px] text-right text-yellow-200 opacity-80 bg-yellow-900/20 p-2 rounded">
+                                        <p className="font-bold border-b border-yellow-900/50 mb-1 italic">Knowledge</p>
+                                        {seenInfo.map((inf, idx) => <p key={idx}>{inf}</p>)}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* スコアボードの上のボタンエリア */}
+                            <div className="flex gap-2 mb-4">
+                                <button
+                                    onClick={() => { setHistoryTab('quest'); setShowHistoryModal(true); }}
+                                    className="flex-1 py-2 border border-red-500/30 bg-red-500/5 text-red-400 text-[10px] rounded uppercase tracking-widest font-bold"
+                                >
+                                    📜 Quest Logs
+                                </button>
+                                <button
+                                    onClick={() => { setHistoryTab('vote'); setShowHistoryModal(true); }}
+                                    className="flex-1 py-2 border border-blue-500/30 bg-blue-500/5 text-blue-400 text-[10px] rounded uppercase tracking-widest font-bold"
+                                >
+                                    🗳️ Vote Logs
+                                </button>
+                            </div>
+
+                            {/* スコアボード */}
+                            <div className="grid grid-cols-5 gap-1">
+                                {[1, 2, 3, 4, 5].map(i => (
+                                    <div key={i} className={`h-12 flex flex-col items-center justify-center rounded border ${gameState.questResults?.[i - 1] === 'success' ? 'bg-blue-900 border-blue-400' : gameState.questResults?.[i - 1] === 'fail' ? 'bg-red-900 border-red-400' : 'bg-gray-900 opacity-30'} ${gameState.currentQuest === i ? 'border-yellow-400 border-2' : 'border-gray-700'}`}>
+                                        <span className="text-[8px]">Q{i}</span>
+                                        <span className="text-xs font-bold">{QUEST_CONFIG[gameState.playerList.length]?.[i - 1]}人</span>
+                                    </div>
+                                ))}
+                            </div>
+
+                            {/* クエスト履歴リスト */}
+                            {gameState.questHistory && gameState.questHistory.length > 0 && (
+                                <div className="bg-black/60 rounded-lg border border-gray-800 overflow-hidden mb-4">
+                                    <div className="bg-gray-900/50 px-3 py-1 border-b border-gray-800 flex justify-between items-center">
+                                        <span className="text-[10px] text-gray-400 uppercase tracking-widest font-bold">Quest History</span>
+                                        <span className="text-[9px] text-gray-500 italic">遠征の記録</span>
+                                    </div>
+                                    <div className="divide-y divide-gray-800">
+                                        {gameState.questHistory.map((h, idx) => (
+                                            <div key={idx} className="px-3 py-2 flex items-center justify-between animate-fadeIn">
+                                                <div className="flex items-center gap-3">
+                                                    <span className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold ${h.result === 'success' ? 'bg-blue-900/50 text-blue-400 border border-blue-500/30' : 'bg-red-900/50 text-red-400 border border-red-500/30'}`}>
+                                                        Q{idx + 1}
+                                                    </span>
+                                                    <div className="flex flex-wrap gap-1">
+                                                        {h.team.map(member => (
+                                                            <span key={member} className="text-[11px] bg-gray-800 px-1.5 py-0.5 rounded text-gray-300 border border-gray-700">
+                                                                {member}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                                <span className={`text-[10px] font-bold ${h.result === 'success' ? 'text-blue-400' : 'text-red-400'}`}>
+                                                    {h.result === 'success' ? 'SUCCESS' : 'FAIL'}
+                                                </span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* 却下カウンターの表示 */}
+                            <div className="flex justify-between items-center bg-black/40 p-2 rounded border border-red-900/30">
+                                <span className="text-[10px] text-red-400 uppercase tracking-widest">投票失敗回数</span>
+                                <div className="flex gap-1">
+                                    {[1, 2, 3, 4, 5].map(i => (
+                                        <div key={i} className={`w-3 h-3 rounded-full border ${gameState.voteCount >= i ? 'bg-red-600 border-red-400' : 'bg-gray-800 border-gray-600'}`}></div>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* 直前の投票結果 (Last Vote) */}
+                            {gameState.lastVoteResult && (
+                                <div className="bg-blue-900/10 rounded border border-blue-500/20 overflow-hidden mb-4">
+                                    <div className="bg-blue-900/30 px-2 py-1 flex justify-between items-center">
+                                        <span className="text-[9px] text-blue-300 font-bold uppercase tracking-widest">Last Vote Reveal</span>
+                                        <span className="text-[8px] text-blue-400 opacity-70">前回の投票内訳</span>
+                                    </div>
+                                    <div className="p-2 flex flex-wrap gap-2 justify-center">
+                                        {gameState.lastVoteResult.split("  ").map((vote, i) => {
+                                            const [name, sign] = vote.split(":");
+                                            return (
+                                                <div key={i} className={`flex flex-col items-center min-w-[50px] p-1 rounded border ${sign === '○' ? 'bg-green-900/20 border-green-500/30' : 'bg-red-900/20 border-red-500/30'}`}>
+                                                    <span className="text-[10px] text-gray-300 truncate w-full text-center">{name}</span>
+                                                    <span className={`text-sm font-bold ${sign === '○' ? 'text-green-400' : 'text-red-400'}`}>
+                                                        {sign === '○' ? '承認' : '却下'}
+                                                    </span>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            )}
+
+
+                            {/* メインアクションエリア */}
+                            <div className="bg-dark-card p-5 rounded-lg border-l-4 border-[#c5a059] shadow-xl min-h-[160px] flex flex-col justify-center">
+                                {gameState.phase === 'propose' && (
+                                    <div className="space-y-3">
+                                        <p className="text-sm text-center font-bold">
+                                            {gameState.currentLeader === myName ? "あなたがリーダーです。メンバー選定中..." : `リーダー ${gameState.currentLeader} が選定中...`}
+                                        </p>
+                                        {gameState.currentLeader === myName && (
+                                            <div className="space-y-3">
+                                                <div className="flex flex-wrap gap-2 justify-center">
+                                                    {gameState.playerList.map(p => (
+                                                        <button key={p} onClick={() => setSelectedPlayers(s => s.includes(p) ? s.filter(x => x !== p) : [...s, p])} className={`px-3 py-1 text-xs rounded-full border transition ${selectedPlayers.includes(p) ? 'bg-blue-600 border-blue-400' : 'bg-black border-gray-600'}`}>{p}</button>
+                                                    ))}
+                                                </div>
+                                                <button disabled={selectedPlayers.length !== QUEST_CONFIG[gameState.playerList.length][gameState.currentQuest - 1]} onClick={proposeTeam} className="w-full btn-gold py-2 rounded text-sm shadow-md">チーム提案を送信</button>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
+                                {gameState.phase === 'voting' && (
+                                    <div className="text-center space-y-4">
+                                        <p className="text-sm">提案チーム: <span className="text-white font-bold">{gameState.proposedTeam.join(", ")}</span></p>
+                                        <div className="flex gap-4">
+                                            <button
+                                                disabled={hasActioned} // ★ここを追加
+                                                onClick={() => castVote('yes')}
+                                                className={`flex-1 py-4 rounded font-bold transition-all ${hasActioned ? 'bg-gray-800 opacity-50' : 'bg-green-700 hover:bg-green-600 shadow-[0_0_15px_rgba(34,197,94,0.3)]'
+                                                    }`}
+                                            >
+                                                {hasActioned ? "提出済" : "承認"}
+                                            </button>
+
+                                            <button
+                                                disabled={hasActioned} // ★ここを追加
+                                                onClick={() => castVote('no')}
+                                                className={`flex-1 py-4 rounded font-bold transition-all ${hasActioned ? 'bg-gray-800 opacity-50' : 'bg-red-900 hover:bg-red-800 shadow-[0_0_15px_rgba(239,68,68,0.3)]'
+                                                    }`}
+                                            >
+                                                {hasActioned ? "提出済" : "却下"}
+                                            </button>
+                                        </div>
+
+                                    </div>
+                                )}
+
+                                {gameState.phase === 'quest' && (
+                                    <div className="text-center space-y-6 py-4">
+                                        {/* --- 3番：結合ポイント（演出フラグで分岐） --- */}
+                                        {revealing ? (
+                                            /* 豪華なカードめくり演出画面 */
+                                            <div className="fixed inset-0 z-[100] bg-black/95 flex flex-col items-center justify-center p-6 animate-fadeIn">
+                                                <h2 className="font-cinzel text-xl gold-text mb-8 tracking-[0.3em] animate-pulse">REVEALING FATE</h2>
+
+                                                <div className="flex gap-3 flex-wrap justify-center mb-8">
+                                                    {/* 遠征メンバーの人数分だけカードを表示 */}
+                                                    {Array.from({ length: gameState.proposedTeam.length }).map((_, i) => {
+                                                        const res = displayResults[i]; // 演出用の1枚ずつの結果
+                                                        return (
+                                                            <div key={i} className={`w-16 h-24 border-2 flex items-center justify-center transition-all duration-500 transform shadow-lg
+                                ${res ? (res === 'success' ? 'bg-blue-900 border-blue-400 rotate-0 scale-105' : 'bg-red-900 border-red-400 rotate-0 scale-105')
+                                                                    : 'bg-gray-900 border-gray-700 rotate-12 scale-90 opacity-50'}`}>
+                                                                {res && (
+                                                                    <span className="text-3xl font-bold text-white drop-shadow-[0_0_10px_rgba(255,255,255,0.5)]">
+                                                                        {res === 'success' ? '○' : '×'}
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+
+                                                {/* すべてめくり終わった時の最終判定テキスト：ここを差し替え */}
+                                                {displayResults.length === gameState.proposedTeam.length && (
+                                                    <div className="text-center space-y-2">
+                                                        <p className={`text-4xl font-cinzel font-bold tracking-[0.2em] drop-shadow-lg ${displayResults.filter(r => r === 'fail').length >= (gameState.currentQuest === 4 && gameState.playerList.length >= 7 ? 2 : 1)
+                                                            ? 'text-fail-glow animate-shake' : 'text-success-glow'
+                                                            }`}>
+                                                            {displayResults.filter(r => r === 'fail').length >= (gameState.currentQuest === 4 && gameState.playerList.length >= 7 ? 2 : 1)
+                                                                ? 'QUEST FAILED' : 'QUEST SUCCESS'}
+                                                        </p>
+
+                                                        {/* 失敗数も表示すると分かりやすいです */}
+                                                        <p className="text-[10px] text-gray-400 uppercase tracking-widest">
+                                                            {displayResults.filter(r => r === 'fail').length} Failure card(s) detected
+                                                        </p>
+
+                                                        <p className="text-[10px] text-gold/60 mt-4 animate-pulse uppercase tracking-tighter">Archiving Results to Chronicle...</p>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ) : (
+                                            /* --- 既存のUI（待機中 or ボタン操作） --- */
+                                            <>
+                                                <div className="mb-2">
+                                                    <p className="text-[10px] text-gray-500 uppercase tracking-widest mb-2">Quest Progress</p>
+                                                    <div className="py-6 bg-black/40 rounded-lg border border-white/5">
+                                                        <div className="relative inline-block">
+                                                            <div className="animate-spin inline-block w-8 h-8 border-[3px] border-gold/20 border-t-gold rounded-full"></div>
+                                                        </div>
+                                                        <p className="text-xs text-gold mt-4 font-cinzel tracking-widest animate-pulse">
+                                                            ENVOYS ARE CHOOSING FATE...
+                                                        </p>
+                                                        <p className="text-[10px] text-gray-500 mt-1">（遠征メンバーが運命を選択中）</p>
+                                                    </div>
+                                                </div>
+
+                                                {gameState.proposedTeam.includes(myName) ? (
+                                                    <div className="space-y-4 pt-4 border-t border-gray-800">
+                                                        <p className="text-xs font-bold text-blue-400">
+                                                            {hasActioned ? "意思表示を完了しました" : "あなたの運命を選択してください"}
+                                                        </p>
+
+                                                        <div className="flex gap-4">
+                                                            <button
+                                                                disabled={hasActioned}
+                                                                onClick={() => questAction('success')}
+                                                                className={`flex-1 py-5 rounded-none font-bold transition-all border ${hasActioned
+                                                                    ? 'bg-gray-900 border-gray-800 text-gray-600 opacity-50'
+                                                                    : 'bg-blue-900/40 border-blue-500 text-blue-100 hover:bg-blue-600'
+                                                                    }`}
+                                                            >
+                                                                {hasActioned ? "提出済" : "成 功"}
+                                                            </button>
+
+                                                            <button
+                                                                disabled={hasActioned}
+                                                                onClick={() => questAction('fail')}
+                                                                className={`flex-1 py-5 rounded-none font-bold transition-all border ${hasActioned
+                                                                    ? 'bg-gray-900 border-gray-800 text-gray-600 opacity-50'
+                                                                    : 'bg-red-900/40 border-red-500 text-red-100 hover:bg-red-600'
+                                                                    }`}
+                                                            >
+                                                                {hasActioned ? "提出済" : "失 敗"}
+                                                            </button>
+                                                        </div>
+
+                                                        <p className="text-[10px] text-gray-500 italic leading-tight px-4 bg-gray-900/50 py-2 rounded">
+                                                            ※正義の陣営（善側）は、どちらのボタンを選択しても自動的に「成功」として集計されます。
+                                                        </p>
+                                                    </div>
+                                                ) : (
+                                                    <div className="py-10 text-xs text-gray-500 border-t border-gray-800 italic">
+                                                        あなたは遠征を見守っています...<br />
+                                                        (審判の時を待て)
+                                                    </div>
+                                                )}
+                                            </>
+                                        )}
+                                    </div>
+                                )}
+
+                                {gameState.phase === 'assassination' && (
+                                    <div className="text-center space-y-4">
+                                        <p className="text-sm text-red-400 font-bold">【暗殺フェーズ】</p>
+                                        {gameState.playerMap[myName] === '暗殺者' ? (
+                                            <div className="space-y-3">
+                                                <p className="text-xs">マーリンだと思う人物を指名してください</p>
+                                                <div className="flex flex-wrap gap-2 justify-center">
+                                                    {gameState.playerList.filter(p => p !== myName).map(p => (
+                                                        <button key={p} onClick={() => executeAssassination(name)} className="px-4 py-2 bg-red-900 border border-red-500 rounded text-xs">暗殺: {p}</button>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        ) : <p className="animate-pulse">暗殺者の決断を待っています...</p>}
+                                    </div>
+                                )}
+
+                                {gameState.phase === 'end' && (
+                                    <div className="fixed inset-0 z-[300] bg-black/95 flex flex-col items-center justify-center p-6 animate-fadeIn backdrop-blur-sm">
+                                        <div className={`text-center space-y-6 max-w-sm w-full p-8 border-2 rounded-lg shadow-2xl ${gameState.winner === 'GOOD' ? 'border-blue-500/50 bg-blue-900/10' : 'border-red-600/50 bg-red-900/10'}`}>
+
+                                            {/* メインタイトル：勝敗によって色とアニメーションを変える */}
+                                            <div className="space-y-2">
+                                                <p className={`text-5xl font-cinzel tracking-[0.2em] font-bold ${gameState.winner === 'GOOD' ? 'text-blue-400 drop-shadow-[0_0_15px_rgba(59,130,246,0.5)]' : 'text-red-500 drop-shadow-[0_0_15px_rgba(220,38,38,0.5)] animate-shake'}`}>
+                                                    {gameState.winner === 'GOOD' ? 'VICTORY' : 'DEFEAT'}
+                                                </p>
+                                                <p className="text-lg font-bold text-white tracking-widest">
+                                                    {gameState.winner === 'GOOD' ? '正義の軍勢の勝利' : '邪悪な魔力の勝利'}
+                                                </p>
+                                            </div>
+
+                                            {/* 決着の理由を表示するバッジ */}
+                                            <div className="py-2 px-4 bg-white/5 rounded-full inline-block border border-white/10">
+                                                <p className="text-[10px] text-gray-400 uppercase tracking-[0.2em]">
+                                                    {gameState.winner === 'EVIL' ? (
+                                                        gameState.questResults?.filter(r => r === 'fail').length >= 3
+                                                            ? "📜 遠征が3回失敗した"
+                                                            : "🔪 マーリンが暗殺された"
+                                                    ) : (
+                                                        "🛡️ 遠征成功 ＆ 暗殺阻止"
+                                                    )}
+                                                </p>
+                                            </div>
+
+                                            {/* 真実の記録（プレイヤーリスト） */}
+                                            <div className="bg-black/60 p-4 rounded-lg border border-white/10 space-y-2">
+                                                <p className="text-[10px] text-gold/60 uppercase tracking-widest mb-3 border-b border-white/10 pb-1">Archive of Truth</p>
+                                                <div className="space-y-2 max-h-[30vh] overflow-y-auto custom-scrollbar pr-2">
+                                                    {Object.entries(gameState.playerMap).map(([name, role]) => (
+                                                        <div key={name} className="flex justify-between items-center border-b border-white/5 py-1.5 text-sm">
+                                                            <span className="text-gray-200 font-medium">{name}</span>
+                                                            <span className={`font-cinzel text-xs font-bold ${['暗殺者', 'モルガナ', 'モードレッド', 'オベロン'].includes(role) ? 'text-red-400' : 'text-blue-400'}`}>
+                                                                {role}
+                                                            </span>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* ログエリア */}
+                            <div className="bg-black/80 p-3 h-40 overflow-y-auto rounded border border-gray-800 text-[10px] space-y-1">
+                                {gameState.logs?.slice().reverse().map((l, i) => (
+                                    <p key={i} className="border-b border-gray-900 pb-1 text-gray-400">
+                                        <span className="text-[#c5a059]">{l}</span>
+                                    </p>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                    {/* 全履歴モーダル */}
+                    {showHistoryModal && (
+                        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 backdrop-blur-md">
+                            <div className="absolute inset-0 bg-black/90" onClick={() => setShowHistoryModal(false)}></div>
+                            <div className="relative bg-[#0d0d0f] border-2 border-gray-800 w-full max-w-md max-h-[85vh] overflow-hidden flex flex-col shadow-2xl">
+
+                                {/* ヘッダー */}
+                                <div className="p-4 border-b border-gray-800 bg-gray-900/50 flex justify-between items-center">
+                                    <h3 className="font-cinzel text-lg gold-text tracking-widest">KINGDOM ARCHIVES</h3>
+                                    <button onClick={() => setShowHistoryModal(false)} className="text-gray-500 text-2xl">&times;</button>
+                                </div>
+
+                                {/* タブ切り替えスイッチ */}
+                                <div className="flex border-b border-gray-800">
+                                    <button
+                                        onClick={() => setHistoryTab('quest')}
+                                        className={`flex-1 py-3 text-[10px] font-bold uppercase tracking-widest transition-all ${historyTab === 'quest' ? 'text-gold border-b-2 border-gold bg-gold/5' : 'text-gray-500'}`}
+                                    >
+                                        📜 Quest Logs
+                                    </button>
+                                    <button
+                                        onClick={() => setHistoryTab('vote')}
+                                        className={`flex-1 py-3 text-[10px] font-bold uppercase tracking-widest transition-all ${historyTab === 'vote' ? 'text-blue-400 border-b-2 border-blue-400 bg-blue-400/5' : 'text-gray-500'}`}
+                                    >
+                                        🗳️ Vote Logs
+                                    </button>
+                                </div>
+
+                                {/* コンテンツエリア */}
+                                <div className="flex-1 overflow-y-auto p-4 custom-scrollbar bg-black/20">
+                                    {historyTab === 'quest' ? (
+                                        /* 遠征ログ */
+                                        <div className="space-y-4 animate-fadeIn">
+                                            {gameState.questHistory && gameState.questHistory.length > 0 ? (
+                                                gameState.questHistory.map((qh, i) => (
+                                                    <div key={i} className="bg-white/5 p-4 border-l-4 border-red-500/50 rounded-r shadow-inner">
+                                                        <div className="flex justify-between items-center mb-2">
+                                                            <span className="text-[12px] text-gray-300 font-cinzel">QUEST 0{i + 1}</span>
+                                                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${qh.result === 'success' ? 'bg-blue-900 text-blue-200' : 'bg-red-900 text-red-200'}`}>
+                                                                {qh.result === 'success' ? "SUCCESS" : "FAILED"}
+                                                            </span>
+                                                        </div>
+                                                        <div className="space-y-1">
+                                                            <p className="text-[11px] text-gray-400"><span className="text-gold/50">TEAM:</span> {qh.team.join(", ")}</p>
+                                                            <p className="text-[10px] text-gray-500 font-mono tracking-widest pt-1 border-t border-white/5">RESULT: {qh.details}</p>
+                                                        </div>
+                                                    </div>
+                                                ))
+                                            ) : (
+                                                <div className="text-center py-20 text-gray-600 italic text-xs">No quest records found in the archives.</div>
+                                            )}
+                                        </div>
+                                    ) : (
+                                        /* 投票ログ */
+                                        <div className="space-y-3 animate-fadeIn">
+                                            {gameState.voteHistory && gameState.voteHistory.length > 0 ? (
+                                                // .reverse() を削除して時系列順（下が新しい）に変更
+                                                gameState.voteHistory.map((vh, i) => (
+                                                    <div key={i} className="bg-white/5 p-3 border-l-4 border-blue-500/50 rounded-r shadow-inner">
+                                                        <div className="flex justify-between items-center mb-1">
+                                                            <span className="text-[10px] text-gray-400 font-bold uppercase tracking-tighter">Q{vh.quest} - Attempt {vh.count}</span>
+                                                            <span className={`text-[10px] font-bold ${vh.approved ? "text-green-500" : "text-red-500"}`}>
+                                                                {vh.approved ? "APPROVED" : "REJECTED"}
+                                                            </span>
+                                                        </div>
+                                                        <div className="flex flex-col gap-1 mb-2">
+                                                            <p className="text-[11px] text-gray-300 font-medium leading-none">Leader: {vh.leader}</p>
+                                                            {/* ★追加：提案メンバーを表示 */}
+                                                            <p className="text-[10px] text-blue-400">
+                                                                <span className="opacity-50 text-[8px]">PROPOSED:</span> {vh.team ? vh.team.join(", ") : "---"}
+                                                            </p>
+                                                        </div>
+                                                        <div className="text-[9px] text-gray-500 bg-black/40 p-2 rounded leading-relaxed break-all font-mono border border-white/5">
+                                                            {vh.details}
+                                                        </div>
+                                                    </div>
+                                                ))
+                                            ) : (
+                                                <div className="text-center py-20 text-gray-600 italic text-xs">No voting history recorded yet.</div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+
+                                <button onClick={() => setShowHistoryModal(false)} className="p-4 bg-gray-900 text-white text-[10px] font-bold uppercase tracking-[0.2em] hover:bg-black transition-colors">
+                                    Return to Command
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                    {/* 役職ヘルプモーダル */}
+                    {showHelp && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
+                            <div className="absolute inset-0 bg-black/90 backdrop-blur-sm" onClick={() => setShowHelp(false)}></div>
+                            <div className="relative bg-[#1a1a1e] border-2 border-[#c5a059] p-6 w-full max-w-sm shadow-[0_0_50px_rgba(197,160,89,0.2)]">
+                                <h4 className="font-cinzel gold-text text-xl mb-2">{gameState.playerMap?.[myName]}の導き</h4>
+                                <p className="text-sm text-gray-300 leading-relaxed mb-6">
+                                    {ROLE_HELP[gameState.playerMap?.[myName]]}
+                                </p>
+
+                                <div className="space-y-2 mb-6">
+                                    <p className="text-[10px] text-gold uppercase tracking-tighter border-b border-gold/30">陣営の相関</p>
+                                    <div className="text-[11px] text-gray-400">
+                                        {gameState.playerMap?.[myName] === 'マーリン' && "見える相手: 暗殺者, モルガナ, オベロン"}
+                                        {gameState.playerMap?.[myName] === 'パーシヴァル' && "見える相手: マーリン, モルガナ"}
+                                        {['暗殺者', 'モルガナ', 'モードレッド'].includes(gameState.playerMap?.[myName]) && "見える相手: 邪悪な仲間（オベロン以外）"}
+                                        {['忠臣', 'オベロン'].includes(gameState.playerMap?.[myName]) && "見える相手: なし"}
+                                    </div>
+                                </div>
+
+                                <button
+                                    onClick={() => setShowHelp(false)}
+                                    className="w-full py-2 bg-gold text-black font-bold text-sm uppercase"
+                                >
+                                    閉じる
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                    {/* 役職判明演出モーダル */}
+                    {isRevealingRole && (
+                        <div className="fixed inset-0 z-[200] bg-black flex flex-col items-center justify-center p-8 animate-fadeIn">
+                            <div className="text-center space-y-8 max-w-xs w-full">
+                                <h2 className="text-gold font-cinzel text-sm tracking-[0.5em] animate-pulse">IDENTITY ASSIGNED</h2>
+
+                                {/* カードの背面から表面へひっくり返るような演出 */}
+                                <div className="relative w-48 h-64 mx-auto perspective-1000">
+                                    <div className="w-full h-full bg-gradient-to-b from-gold/20 to-transparent border-2 border-gold/50 rounded-lg flex flex-col items-center justify-center p-6 shadow-[0_0_30px_rgba(212,175,55,0.2)] animate-cardReveal">
+                                        <p className="text-[10px] text-gold/60 uppercase tracking-widest mb-2">You Are</p>
+                                        <h3 className="text-3xl font-cinzel text-white font-bold mb-4 text-center">
+                                            {gameState.playerMap?.[myName]}
+                                        </h3>
+                                        <div className="w-12 h-0.5 bg-gold/30 mb-4"></div>
+                                        <p className="text-[11px] text-gray-400 leading-relaxed italic">
+                                            {['暗殺者', 'モルガナ', 'モードレッド', 'オベロン'].includes(gameState.playerMap?.[myName])
+                                                ? "邪悪の軍勢として、アーサーの忠臣を欺き、遠征を阻止せよ。"
+                                                : "アーサー王の忠臣として、聖杯を求め、邪悪な影を暴き出せ。"}
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <button
+                                    onClick={() => setIsRevealingRole(false)}
+                                    className="w-full py-4 bg-white/5 border border-white/20 text-white font-cinzel text-xs tracking-widest hover:bg-white/10 transition-all"
+                                >
+                                    UNDERSTOOD
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* 投票結果の全画面演出 */}
+                    {isRevealingVote && (
+                        <div className="fixed inset-0 z-[280] flex flex-col items-center justify-center animate-fadeIn backdrop-blur-sm bg-black/40">
+                            <div className={`transform scale-150 p-8 rounded-lg border-2 shadow-[0_0_50px_rgba(0,0,0,0.5)] ${lastVoteStatus === 'approved' // ここが 'approved' なら青
+                                ? 'bg-blue-900/90 border-blue-400 text-blue-100'
+                                : 'bg-red-900/90 border-red-500 text-red-100'   // それ以外（rejected）なら赤
+                                }`}>
+                                <h2 className="font-cinzel text-4xl tracking-[0.4em] font-bold animate-cardReveal">
+                                    {lastVoteStatus === 'approved' ? 'APPROVED' : 'REJECTED'}
+                                </h2>
+                                <p className="text-[10px] mt-2 tracking-[0.2em] opacity-80 uppercase text-center">
+                                    {lastVoteStatus === 'approved' ? '遠征部隊、出発' : '提案は退けられた'}
+                                </p>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* マッチポイント遠征の激アツカットイン */}
+                    {isMatchPointPerforming && (
+                        <div className="fixed inset-0 z-[500] bg-black flex flex-col items-center justify-center overflow-hidden">
+                            {/* 背景の激しいフラッシュ */}
+                            <div className="absolute inset-0 bg-gold/10 animate-pulse"></div>
+                            <div className="absolute inset-0 border-[20px] border-double border-gold/30 animate-ping"></div>
+
+                            <div className="relative z-10 text-center">
+                                <p className="text-gold font-cinzel text-xl tracking-[0.5em] animate-bounce">
+                                    CRITICAL QUEST
+                                </p>
+                                <h2 className="text-7xl font-cinzel font-bold text-white italic tracking-tighter shadow-gold drop-shadow-[0_0_20px_rgba(255,215,0,0.8)]">
+                                    運命の審判
+                                </h2>
+                                <div className="mt-8 flex gap-4 justify-center">
+                                    <div className="w-12 h-12 rounded-full border-2 border-blue-500 animate-spin"></div>
+                                    <div className="w-12 h-12 rounded-full border-2 border-red-500 animate-[spin_1.5s_linear_infinite_reverse]"></div>
+                                </div>
+                                <p className="mt-8 text-white/60 font-bold tracking-widest animate-pulse">
+                                    決着の時が来た...
+                                </p>
+                            </div>
+
+                            {/* 画面を斜めに走る光のライン */}
+                            <div className="absolute top-0 left-[-100%] w-[300%] h-[100%] bg-gradient-to-r from-transparent via-white/20 to-transparent rotate-[35deg] animate-[shimmer_2s_infinite]"></div>
+                        </div>
+                    )}
+
+                    {/* 暗殺開始の警告演出 */}
+                    {isRevealingAssassination && (
+                        <div className="fixed inset-0 z-[250] bg-red-950/90 flex flex-col items-center justify-center p-8 animate-fadeIn backdrop-blur-md">
+                            <div className="text-center space-y-4">
+                                <div className="text-red-500 text-6xl mb-4 animate-bounce">🔪</div>
+                                <h2 className="text-white font-cinzel text-3xl tracking-[0.3em] font-bold">ASSASSINATION</h2>
+                                <p className="text-red-300 font-bold tracking-widest animate-pulse">邪悪の逆転劇が始まる...</p>
+                            </div>
+                        </div>
+                    )}
+
+                    {isAssassinating && (
+                        <div className="fixed inset-0 z-[400] bg-black flex flex-col items-center justify-center overflow-hidden">
+                            {/* 背景の走査線・フラッシュ演出 */}
+                            <div className="absolute inset-0 bg-red-900/20 animate-pulse"></div>
+
+                            <div className="relative z-10 text-center space-y-8">
+                                {/* カットイン */}
+                                <div className="animate-revealIdentity">
+                                    <p className="text-gold text-xs tracking-[0.5em] mb-2 uppercase">Assassination in Progress</p>
+                                    <h2 className="text-6xl font-cinzel font-bold text-white tracking-tighter">
+                                        TARGET: <span className="text-red-600 underline">{gameState.assassinationTarget}</span>
+                                    </h2>
+                                </div>
+
+                                {/* 運命のタメ（プログレスバー） */}
+                                <div className="w-64 h-1 bg-white/10 mx-auto overflow-hidden relative">
+                                    <div className="absolute inset-0 bg-red-600 animate-[loading_5s_ease-in-out]"></div>
+                                </div>
+
+                                <div className="text-white font-bold italic animate-pulse tracking-widest text-lg">
+                                    CHECKING IDENTITY...
+                                </div>
+                            </div>
+
+                            {/* 稲妻のようなエフェクト（CSSで追加） */}
+                            <div className="absolute top-0 left-0 w-full h-full pointer-events-none opacity-30 bg-[radial-gradient(circle,transparent_20%,black_100%)]"></div>
+                        </div>
+                    )}
+
+                    {/* 最終結果（勝敗決定）の豪華演出 */}
+                    {gameState?.phase === 'end' && (
+                        <div className="fixed inset-0 z-[300] bg-black/95 flex flex-col items-center justify-center p-6 animate-fadeIn backdrop-blur-md">
+                            <div className={`text-center space-y-6 max-w-sm w-full p-8 border-2 rounded-lg shadow-2xl ${gameState.winner === 'GOOD' ? 'border-blue-500/50 bg-blue-900/10' : 'border-red-600/50 bg-red-900/10'}`}>
+
+                                <div className="space-y-2">
+                                    <p className={`text-5xl font-cinzel tracking-[0.2em] font-bold ${gameState.winner === 'GOOD' ? 'text-blue-400 drop-shadow-[0_0_15px_rgba(59,130,246,0.5)]' : 'text-red-500 drop-shadow-[0_0_15px_rgba(220,38,38,0.5)]'}`}>
+                                        {gameState.winner === 'GOOD' ? 'VICTORY' : 'DEFEAT'}
+                                    </p>
+                                    <p className="text-lg font-bold text-white tracking-widest">
+                                        {gameState.winner === 'GOOD' ? '正義の軍勢の勝利' : '邪悪な魔力の勝利'}
+                                    </p>
+                                </div>
+
+                                {/* 決着の理由を判定して表示 */}
+                                <div className="py-2 px-4 bg-white/5 rounded-full inline-block border border-white/10">
+                                    <p className="text-[10px] text-gray-400 uppercase tracking-[0.2em]">
+                                        {gameState.winner === 'EVIL' ? (
+                                            gameState.questResults?.filter(r => r === 'fail').length >= 3
+                                                ? "📜 遠征失敗による敗北"
+                                                : gameState.voteCount >= 5
+                                                    ? "⚖️ 5回連続の提案却下"
+                                                    : "🔪 マーリンが暗殺された"
+                                        ) : (
+                                            "🛡️ 遠征成功 ＆ 暗殺回避"
+                                        )}
+                                    </p>
+                                </div>
+
+                                {/* 真実の記録（プレイヤーリスト） */}
+                                <div className="bg-black/60 p-4 rounded-lg border border-white/10 space-y-2">
+                                    <p className="text-[10px] text-gold/60 uppercase tracking-widest mb-3 border-b border-white/10 pb-1">Archive of Truth</p>
+                                    <div className="space-y-2 max-h-[30vh] overflow-y-auto custom-scrollbar pr-2 text-left">
+                                        {Object.entries(gameState.playerMap).map(([name, role]) => (
+                                            <div key={name} className="flex justify-between items-center border-b border-white/5 py-1.5 text-sm">
+                                                <span className="text-gray-200">{name}</span>
+                                                <span className={`font-cinzel text-xs font-bold ${['暗殺者', 'モルガナ', 'モードレッド', 'オベロン'].includes(role) ? 'text-red-400' : 'text-blue-400'}`}>
+                                                    {role}
+                                                </span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                {/* 豪華なリザルト画面の中 */}
+                                <div className="flex flex-col gap-3 w-full mt-6">
+                                    {/* 古い RETURN TO COMMAND ボタンを消して、これに差し替える */}
+                                    <button
+                                        onClick={handleReset}
+                                        className="w-full py-2 text-gray-500 font-cinzel text-[10px] tracking-widest hover:text-white transition-all opacity-60 hover:opacity-100"
+                                    >
+                                        EXIT TO TITLE
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const checkFB = setInterval(() => { if (window.fb) { clearInterval(checkFB); ReactDOM.createRoot(document.getElementById('root')).render(<App />); } }, 100);
+    </script>
+</body>
+
+</html>
