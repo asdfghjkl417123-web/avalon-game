@@ -181,6 +181,22 @@
             animation: fadeIn 0.5s ease-out forwards;
         }
 
+        .player-tag {
+            background: rgba(197, 160, 89, 0.1);
+            border: 1px solid rgba(197, 160, 89, 0.3);
+            color: #e2d1a4;
+            font-size: 10px;
+            padding: 2px 8px;
+            border-radius: 4px;
+            white-space: nowrap;
+        }
+
+        .player-tag.is-me {
+            border-color: #c5a059;
+            background: rgba(197, 160, 89, 0.3);
+            font-weight: bold;
+        }
+
         @keyframes fadeIn {
             from {
                 opacity: 0;
@@ -235,6 +251,8 @@
             const [isAssassinating, setIsAssassinating] = React.useState(false); // 演出実行中
             const [isMatchPointPerforming, setIsMatchPointPerforming] = React.useState(false);
             const [wantsRematch, setWantsRematch] = React.useState(false);
+            const [voteConfirm, setVoteConfirm] = useState(null); // 'yes' | 'no' | null
+            const [questConfirm, setQuestConfirm] = useState(null); // 'success' | 'fail' | null
 
             // DBの変更を監視して演出を開始するuseEffect
             // 1. データのリアルタイム監視（参加者更新・フェーズ進行に必須）
@@ -283,6 +301,8 @@
             // 3. 次のフェーズに進んだらボタンを再び押せるようにする
             useEffect(() => {
                 setHasActioned(false);
+                setVoteConfirm(null);
+                setQuestConfirm(null);
             }, [gameState?.phase, gameState?.voteCount, gameState?.currentQuest]);
 
             // ② 遠征結果演出の同期
@@ -343,8 +363,12 @@
 
             const finishQuestLogic = (resultsArray) => {
                 const fails = resultsArray.filter(v => v === 'fail').length;
-                const isQ4Special = (gameState.currentQuest === 4 && gameState.playerList.length >= 7);
-                const success = isQ4Special ? fails < 2 : fails < 1;
+                // 8人以上の時はQ3とQ4、7人の時はQ4のみ、失敗が2枚必要
+                const isTwoFailsRequired =
+                    (gameState.currentQuest === 4 && gameState.playerList.length >= 7) ||
+                    (gameState.currentQuest === 3 && gameState.playerList.length === 8);
+
+                const success = isTwoFailsRequired ? fails < 2 : fails < 1;
 
                 const newResults = [...(gameState.questResults || []), success ? 'success' : 'fail'];
                 const newHistoryEntry = {
@@ -400,10 +424,19 @@
             };
 
             const startGame = () => {
+                // 1. 全プレイヤーの名前を取得
                 const players = Object.keys(gameState.players);
                 if (players.length < 5) return alert("5人以上必要です");
 
-                // 安全な役職配布ロジック
+                // 2. 【重要】今回のゲームの「席順（リーダー順）」をランダムに決定
+                // フィッシャー–イェーツのシャッフル
+                const shuffledPlayerList = [...players];
+                for (let i = shuffledPlayerList.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    [shuffledPlayerList[i], shuffledPlayerList[j]] = [shuffledPlayerList[j], shuffledPlayerList[i]];
+                }
+
+                // 3. 役職の準備
                 let baseRoles = ['マーリン', 'パーシヴァル', '忠臣', '暗殺者', 'モルガナ'];
                 if (players.length >= 6) baseRoles.push('忠臣');
                 if (players.length >= 7) baseRoles.push('モードレッド');
@@ -411,21 +444,30 @@
                 if (players.length >= 9) baseRoles.push('忠臣');
                 if (players.length >= 10) baseRoles.push('オベロン');
 
-                const shuffled = baseRoles.sort(() => Math.random() - 0.5);
-                const playerMap = {};
-                players.forEach((p, i) => { playerMap[p] = shuffled[i]; });
+                // 4. 役職をシャッフル
+                const shuffledRoles = baseRoles.sort(() => Math.random() - 0.5);
 
+                // 5. 「シャッフルされた席順」のプレイヤーに対して、役職を割り当て
+                const playerMap = {};
+                shuffledPlayerList.forEach((playerName, i) => {
+                    playerMap[playerName] = shuffledRoles[i];
+                });
+
+                // 6. データベースへ書き込み
                 dbUpdate({
                     started: true,
                     phase: 'propose',
                     playerMap,
-                    playerList: players,
-                    currentLeader: players[0],
+                    // これ以降、ゲームはこの「shuffledPlayerList」の順番で進行します
+                    playerList: shuffledPlayerList,
+                    // 最初のリーダーは、シャッフル後のリストの1番目の人
+                    currentLeader: shuffledPlayerList[0],
                     currentQuest: 1,
                     voteCount: 0,
                     questResults: [],
                     logs: [`[${new Date().toLocaleTimeString()}] 聖戦が開始されました`]
                 });
+
                 setIsRevealingRole(true);
             };
 
@@ -462,6 +504,21 @@
                 setHasActioned(true);
 
                 const newVotes = { ...(gameState.votes || {}), [myName]: choice };
+
+                // ▼ 追加：投票したことをログに流す（内容は伏せる）
+                const newLogs = addLog(`${myName} が投票しました`);
+
+                if (Object.keys(newVotes).length === gameState.playerList.length) {
+                    // ... 全員の投票が揃った時の既存ロジック ...
+                    // dbUpdate 内の logs には、既存の「提案承認/却下」のメッセージが既にあるため、
+                    // 全員揃った時のログは既存のままでOKです。
+                } else {
+                    // まだ全員揃っていない場合、投票状況とログを更新
+                    dbUpdate({
+                        votes: newVotes,
+                        logs: newLogs // 追加
+                    });
+                }
 
                 // 全員の投票が揃ったかチェック
                 if (Object.keys(newVotes).length === gameState.playerList.length) {
@@ -506,8 +563,10 @@
                     } else {
                         const idx = (gameState.playerList.indexOf(gameState.currentLeader) + 1) % gameState.playerList.length;
                         const count = (gameState.voteCount || 0) + 1;
+
+                        // ★ここを修正
                         dbUpdate({
-                            ...baseUpdate,
+                            ...baseUpdate, // ここで一旦 lastVoteId 等が入る
                             phase: count >= 5 ? 'end' : 'propose',
                             winner: count >= 5 ? 'EVIL' : null,
                             currentLeader: gameState.playerList[idx],
@@ -523,6 +582,13 @@
             const questAction = (choice) => {
                 if (hasActioned) return;
                 setHasActioned(true);
+
+                dbUpdate({
+                    // baseUpdate の内容を上書きして、演出用データをクリアする
+                    // これにより、次の人が「クエスト提案」を始めた瞬間、古い「REJECTED」演出は消えます
+                    lastVoteId: null,
+                    lastVoteStatus: null,
+                });
 
                 const myRole = gameState.playerMap[myName];
                 const isEvil = ['暗殺者', 'モルガナ', 'モードレッド', 'オベロン'].includes(myRole);
@@ -575,8 +641,7 @@
             const handleReset = () => {
                 setWantsRematch(false); // 追加
                 setHasActioned(false);  // 追加
-                if (confirm("リセットしますか？")) {
-                    // 次回ゲーム時にまた演出が見れるようにフラグを消す
+                if (confirm("【警告】ゲームを完全にリセットします。よろしいですか？\n※現在の進行データはすべて削除されます。")) {
                     sessionStorage.removeItem(`revealed_${roomCode}`);
                     window.fb.remove(window.fb.ref(window.fb.db, `rooms/${roomCode}`));
                     location.reload();
@@ -584,6 +649,7 @@
             };
 
             const executeAssassination = (targetName) => {
+                // targetName には正しく選んだ相手の名前が入るようになりました
                 const isMerlin = gameState.playerMap[targetName] === 'マーリン';
 
                 dbUpdate({
@@ -596,34 +662,34 @@
                     dbUpdate({
                         phase: 'end',
                         winner: isMerlin ? 'EVIL' : 'GOOD',
+                        // リザルト表示用に結果を保存
+                        assassinationResult: isMerlin ? 'success' : 'fail',
                         isAssassinationPerforming: false,
-                        logs: addLog(isMerlin ? `暗殺成功！マーリンは${targetName}だった。` : `暗殺失敗！${targetName}はマーリンではなかった。`)
+                        logs: addLog(isMerlin ? `【暗殺成功】マーリンは${targetName}でした。` : `【暗殺失敗】${targetName}はマーリンではありません。`)
                     });
                 }, 5000);
             };
 
+            // handleRematch 内の dbUpdate を以下のように修正
             const handleRematch = () => {
-                if (!gameState || wantsRematch) return;
-
-                // 自分のボタンを「待機中」に変える
-                setWantsRematch(true);
-                // 重要：次のゲームで「すでにアクション済み」判定にならないようにリセット
-                setHasActioned(false);
-
-                const newRematchVotes = { ...(gameState.rematchVotes || {}), [myName]: true };
-
+                // ... 中略 ...
                 if (Object.keys(newRematchVotes).length === gameState.playerList.length) {
                     dbUpdate({
                         started: false,
                         phase: 'propose',
                         currentQuest: 1,
-                        voteCount: 1, // 初期値を1に設定
+                        voteCount: 1,
                         questResults: [],
                         playerMap: {},
                         votes: {},
                         questData: {},
                         tempResults: null,
-                        rematchVotes: {}, // 全員の再戦希望をリセット
+                        rematchVotes: {},
+                        // --- ここを追加 ---
+                        lastVoteStatus: null,
+                        lastVoteId: null,
+                        lastVoteResult: null,
+                        // ------------------
                         logs: addLog("=== 新しいゲームが開始されます ===")
                     });
                 } else {
@@ -648,7 +714,7 @@
                 <div className="max-w-md mx-auto p-4 space-y-4 fade-in">
                     <header className="flex justify-between items-center border-b border-[#c5a059] pb-2">
                         <div className="font-cinzel text-xl gold-text tracking-tighter">AVALON COMMAND</div>
-                        <button onClick={handleReset} className="text-[10px] text-red-500 border border-red-900 px-2 py-1 rounded">RESET</button>
+                        <button onClick={handleReset} className="text-[10px] text-red-500 border border-red-900 px-2 py-1 rounded hover:bg-red-900/20">RESET</button>
                     </header>
 
                     {!gameState?.started ? (
@@ -751,6 +817,38 @@
                                 </div>
                             </div>
 
+                            {/* 2. 統合されたメンバー・投票状況エリア */}
+                            <div className="bg-black/20 p-2 rounded-b border-x border-b border-gray-800 mb-4">
+                                <div className="text-[8px] uppercase tracking-tighter opacity-40 mb-2 flex justify-between">
+                                    <span>Member Status</span>
+                                    {gameState.phase === 'voting' && <span className="text-gold animate-pulse">Waiting for votes...</span>}
+                                </div>
+                                <div className="flex flex-wrap gap-2">
+                                    {gameState.playerList?.map(p => {
+                                        // 投票フェーズ中かつ、その人が既に投票しているか判定
+                                        const hasVoted = gameState.phase === 'voting' && gameState.votes && gameState.votes[p];
+                                        const isMe = p === myName;
+                                        const isLeader = p === gameState.currentLeader;
+
+                                        return (
+                                            <span
+                                                key={p}
+                                                className={`player-tag transition-all duration-300 ${isMe ? 'is-me' : ''
+                                                    } ${hasVoted
+                                                        ? 'bg-green-500/20 border-green-500/50 text-green-200 opacity-100 shadow-[0_0_10px_rgba(34,197,94,0.2)]'
+                                                        : gameState.phase === 'voting' ? 'opacity-40 grayscale-[0.5]' : 'opacity-80'
+                                                    }`}
+                                            >
+                                                {isMe ? '👤 ' : ''}
+                                                {p}
+                                                {isLeader ? ' 👑' : ''}
+                                                {hasVoted ? ' ✓' : ''}
+                                            </span>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+
                             {/* 直前の投票結果 (Last Vote) */}
                             {gameState.lastVoteResult && (
                                 <div className="bg-blue-900/10 rounded border border-blue-500/20 overflow-hidden mb-4">
@@ -798,25 +896,31 @@
                                 {gameState.phase === 'voting' && (
                                     <div className="text-center space-y-4">
                                         <p className="text-sm">提案チーム: <span className="text-white font-bold">{gameState.proposedTeam.join(", ")}</span></p>
-                                        <div className="flex gap-4">
-                                            <button
-                                                disabled={hasActioned} // ★ここを追加
-                                                onClick={() => castVote('yes')}
-                                                className={`flex-1 py-4 rounded font-bold transition-all ${hasActioned ? 'bg-gray-800 opacity-50' : 'bg-green-700 hover:bg-green-600 shadow-[0_0_15px_rgba(34,197,94,0.3)]'
-                                                    }`}
-                                            >
-                                                {hasActioned ? "提出済" : "承認"}
-                                            </button>
 
-                                            <button
-                                                disabled={hasActioned} // ★ここを追加
-                                                onClick={() => castVote('no')}
-                                                className={`flex-1 py-4 rounded font-bold transition-all ${hasActioned ? 'bg-gray-800 opacity-50' : 'bg-red-900 hover:bg-red-800 shadow-[0_0_15px_rgba(239,68,68,0.3)]'
-                                                    }`}
-                                            >
-                                                {hasActioned ? "提出済" : "却下"}
-                                            </button>
-                                        </div>
+                                        {hasActioned ? (
+                                            <div className="py-4 bg-gray-900/50 rounded animate-pulse">
+                                                <p className="text-xs text-gray-500 uppercase tracking-widest font-bold">VOTE SUBMITTED</p>
+                                                <p className="text-[10px] text-gray-600">他のプレイヤーを待っています...</p>
+                                            </div>
+                                        ) : (
+                                            <div className="flex flex-col gap-2">
+                                                {/* 投票ボタン（確認ステップ付） */}
+                                                {!voteConfirm ? (
+                                                    <div className="flex gap-4">
+                                                        <button onClick={() => setVoteConfirm('yes')} className="flex-1 py-4 rounded font-bold bg-green-700 hover:bg-green-600 shadow-lg text-white">承認</button>
+                                                        <button onClick={() => setVoteConfirm('no')} className="flex-1 py-4 rounded font-bold bg-red-900 hover:bg-red-800 shadow-lg text-white">却下</button>
+                                                    </div>
+                                                ) : (
+                                                    <div className="p-4 bg-black/40 border border-gold/30 rounded flex flex-col items-center space-y-3">
+                                                        <p className="text-xs text-gold">【最終確認】 本当に <span className={voteConfirm === 'yes' ? "text-green-400 font-bold" : "text-red-400 font-bold"}>{voteConfirm === 'yes' ? '承認' : '却下'}</span> しますか？</p>
+                                                        <div className="flex gap-2 w-full">
+                                                            <button onClick={() => setVoteConfirm(null)} className="flex-1 py-2 bg-gray-700 text-xs rounded">キャンセル</button>
+                                                            <button onClick={() => castVote(voteConfirm)} className={`flex-1 py-2 text-xs rounded font-bold ${voteConfirm === 'yes' ? 'bg-green-600' : 'bg-red-600'}`}>確定して投票</button>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
                                     </div>
                                 )}
 
@@ -849,11 +953,15 @@
                                                 {/* すべてめくり終わった時の最終判定テキスト：ここを差し替え */}
                                                 {displayResults.length === gameState.proposedTeam.length && (
                                                     <div className="text-center space-y-2">
-                                                        <p className={`text-4xl font-cinzel font-bold tracking-[0.2em] drop-shadow-lg ${displayResults.filter(r => r === 'fail').length >= (gameState.currentQuest === 4 && gameState.playerList.length >= 7 ? 2 : 1)
-                                                            ? 'text-fail-glow animate-shake' : 'text-success-glow'
+                                                        <p className={`text-4xl font-cinzel font-bold tracking-[0.2em] drop-shadow-lg {displayResults.filter(r => r === 'fail').length >= (
+    (gameState.currentQuest === 4 && gameState.playerList.length >= 7) || 
+    (gameState.currentQuest === 3 && gameState.playerList.length === 8) 
+    ? 2 : 1) ? 'text-fail-glow animate-shake' : 'text-success-glow' }
                                                             }`}>
-                                                            {displayResults.filter(r => r === 'fail').length >= (gameState.currentQuest === 4 && gameState.playerList.length >= 7 ? 2 : 1)
-                                                                ? 'QUEST FAILED' : 'QUEST SUCCESS'}
+                                                            {displayResults.filter(r => r === 'fail').length >= (
+                                                                (gameState.currentQuest === 4 && gameState.playerList.length >= 7) ||
+                                                                    (gameState.currentQuest === 3 && gameState.playerList.length === 8)
+                                                                    ? 2 : 1) ? 'QUEST FAILED' : 'QUEST SUCCESS'}
                                                         </p>
 
                                                         {/* 失敗数も表示すると分かりやすいです */}
@@ -887,29 +995,49 @@
                                                             {hasActioned ? "意思表示を完了しました" : "あなたの運命を選択してください"}
                                                         </p>
 
-                                                        <div className="flex gap-4">
-                                                            <button
-                                                                disabled={hasActioned}
-                                                                onClick={() => questAction('success')}
-                                                                className={`flex-1 py-5 rounded-none font-bold transition-all border ${hasActioned
-                                                                    ? 'bg-gray-900 border-gray-800 text-gray-600 opacity-50'
-                                                                    : 'bg-blue-900/40 border-blue-500 text-blue-100 hover:bg-blue-600'
-                                                                    }`}
-                                                            >
-                                                                {hasActioned ? "提出済" : "成 功"}
-                                                            </button>
+                                                        {!hasActioned && (
+                                                            <div className="flex flex-col gap-2">
+                                                                {!questConfirm ? (
+                                                                    /* 選択ボタン */
+                                                                    <div className="flex gap-4">
+                                                                        <button
+                                                                            onClick={() => setQuestConfirm('success')}
+                                                                            className="flex-1 py-5 rounded-none font-bold transition-all border bg-blue-900/40 border-blue-500 text-blue-100 hover:bg-blue-600"
+                                                                        >
+                                                                            成 功
+                                                                        </button>
+                                                                        <button
+                                                                            onClick={() => setQuestConfirm('fail')}
+                                                                            className="flex-1 py-5 rounded-none font-bold transition-all border bg-red-900/40 border-red-500 text-red-100 hover:bg-red-600"
+                                                                        >
+                                                                            失 敗
+                                                                        </button>
+                                                                    </div>
+                                                                ) : (
+                                                                    /* 確認ダイアログ（統合） */
+                                                                    <div className="p-4 bg-black/60 border border-gold/50 rounded flex flex-col items-center space-y-3 animate-fadeIn">
+                                                                        <p className="text-sm text-gold font-bold">
+                                                                            【最終確認】 本当に <span className={questConfirm === 'success' ? "text-blue-400" : "text-red-500"}>{questConfirm === 'success' ? '成功' : '失敗'}</span> を出しますか？
+                                                                        </p>
+                                                                        <div className="flex gap-2 w-full">
+                                                                            <button onClick={() => setQuestConfirm(null)} className="flex-1 py-2 bg-gray-700 text-xs rounded text-white font-bold">キャンセル</button>
+                                                                            <button
+                                                                                onClick={() => { questAction(questConfirm); setQuestConfirm(null); }}
+                                                                                className={`flex-1 py-2 text-xs rounded font-bold text-white ${questConfirm === 'success' ? 'bg-blue-600' : 'bg-red-600'}`}
+                                                                            >
+                                                                                確定して送信
+                                                                            </button>
+                                                                        </div>
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        )}
 
-                                                            <button
-                                                                disabled={hasActioned}
-                                                                onClick={() => questAction('fail')}
-                                                                className={`flex-1 py-5 rounded-none font-bold transition-all border ${hasActioned
-                                                                    ? 'bg-gray-900 border-gray-800 text-gray-600 opacity-50'
-                                                                    : 'bg-red-900/40 border-red-500 text-red-100 hover:bg-red-600'
-                                                                    }`}
-                                                            >
-                                                                {hasActioned ? "提出済" : "失 敗"}
-                                                            </button>
-                                                        </div>
+                                                        {hasActioned && (
+                                                            <div className="py-4 bg-gray-900/50 rounded animate-pulse">
+                                                                <p className="text-xs text-gray-500 uppercase tracking-widest font-bold">ACTION SUBMITTED</p>
+                                                            </div>
+                                                        )}
 
                                                         <p className="text-[10px] text-gray-500 italic leading-tight px-4 bg-gray-900/50 py-2 rounded">
                                                             ※正義の陣営（善側）は、どちらのボタンを選択しても自動的に「成功」として集計されます。
@@ -934,7 +1062,7 @@
                                                 <p className="text-xs">マーリンだと思う人物を指名してください</p>
                                                 <div className="flex flex-wrap gap-2 justify-center">
                                                     {gameState.playerList.filter(p => p !== myName).map(p => (
-                                                        <button key={p} onClick={() => executeAssassination(name)} className="px-4 py-2 bg-red-900 border border-red-500 rounded text-xs">暗殺: {p}</button>
+                                                        <button key={p} onClick={() => executeAssassination(p)} className="px-4 py-2 bg-red-900 border border-red-500 rounded text-xs">暗殺: {p}</button>
                                                     ))}
                                                 </div>
                                             </div>
@@ -1029,41 +1157,59 @@
                                 {/* コンテンツエリア */}
                                 <div className="flex-1 overflow-y-auto p-4 custom-scrollbar bg-black/20">
                                     {historyTab === 'quest' ? (
-                                        /* 遠征ログ */
+                                        /* 遠征ログ（最新が上） */
                                         <div className="space-y-4 animate-fadeIn">
                                             {gameState.questHistory && gameState.questHistory.length > 0 ? (
-                                                gameState.questHistory.map((qh, i) => (
-                                                    <div key={i} className="bg-white/5 p-4 border-l-4 border-red-500/50 rounded-r shadow-inner">
-                                                        <div className="flex justify-between items-center mb-2">
-                                                            <span className="text-[12px] text-gray-300 font-cinzel">QUEST 0{i + 1}</span>
-                                                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${qh.result === 'success' ? 'bg-blue-900 text-blue-200' : 'bg-red-900 text-red-200'}`}>
-                                                                {qh.result === 'success' ? "SUCCESS" : "FAILED"}
-                                                            </span>
+                                                /* reverse()で最新のクエストを一番上に配置 */
+                                                [...gameState.questHistory].reverse().map((qh, i, arr) => {
+                                                    // reverseした後のインデックスから、元のクエスト番号を計算
+                                                    const questNum = arr.length - i;
+                                                    return (
+                                                        <div key={i} className={`p-4 border-l-4 rounded-r shadow-inner bg-white/5 ${qh.result === 'success' ? 'border-blue-500/50' : 'border-red-500/50'}`}>
+                                                            <div className="flex justify-between items-center mb-2">
+                                                                <span className="text-[12px] text-gray-300 font-cinzel tracking-widest text-gold/80">QUEST 0{questNum}</span>
+                                                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-widest ${qh.result === 'success' ? 'bg-blue-900/60 text-blue-200' : 'bg-red-900/60 text-red-200'}`}>
+                                                                    {qh.result === 'success' ? "SUCCESS" : "FAILED"}
+                                                                </span>
+                                                            </div>
+                                                            <div className="space-y-2">
+                                                                <div className="flex flex-wrap gap-1">
+                                                                    {qh.team.map(member => (
+                                                                        <span key={member} className="text-[10px] px-1.5 py-0.5 bg-black/40 text-gray-300 rounded border border-white/5">{member}</span>
+                                                                    ))}
+                                                                </div>
+                                                                <p className="text-[10px] text-gray-500 font-mono tracking-tighter pt-2 border-t border-white/5 flex justify-between">
+                                                                    <span>RESULT DETAIL</span>
+                                                                    <span className="text-gray-400">{qh.details}</span>
+                                                                </p>
+                                                            </div>
                                                         </div>
-                                                        <div className="space-y-1">
-                                                            <p className="text-[11px] text-gray-400"><span className="text-gold/50">TEAM:</span> {qh.team.join(", ")}</p>
-                                                            <p className="text-[10px] text-gray-500 font-mono tracking-widest pt-1 border-t border-white/5">RESULT: {qh.details}</p>
-                                                        </div>
-                                                    </div>
-                                                ))
+                                                    );
+                                                })
                                             ) : (
                                                 <div className="text-center py-20 text-gray-600 italic text-xs">No quest records found in the archives.</div>
                                             )}
                                         </div>
                                     ) : (
-                                        /* 投票ログ */
+                                        /* 投票ログ（最新が上） */
                                         <div className="space-y-3 animate-fadeIn">
                                             {gameState.voteHistory && gameState.voteHistory.length > 0 ? (
+                                                /* 常に最新の提案が一番上にくるよう統一 */
                                                 [...gameState.voteHistory].reverse().map((vh, i) => (
-                                                    <div key={i} className="bg-white/5 p-3 border-l-4 border-blue-500/50 rounded-r shadow-inner">
+                                                    <div key={i} className={`bg-white/5 p-3 border-l-4 rounded-r shadow-inner ${vh.approved ? "border-green-600/40" : "border-gray-700"}`}>
                                                         <div className="flex justify-between items-center mb-1">
-                                                            <span className="text-[10px] text-gray-400 font-bold uppercase tracking-tighter">Q{vh.quest} - Attempt {vh.count}</span>
+                                                            <span className="text-[10px] text-gray-400 font-bold uppercase tracking-widest">Quest {vh.quest} — Attempt {vh.count}</span>
                                                             <span className={`text-[10px] font-bold ${vh.approved ? "text-green-500" : "text-red-500"}`}>
                                                                 {vh.approved ? "APPROVED" : "REJECTED"}
                                                             </span>
                                                         </div>
-                                                        <p className="text-[11px] text-gray-300 mb-2 font-medium">Leader: {vh.leader}</p>
-                                                        <div className="text-[9px] text-gray-500 bg-black/40 p-2 rounded leading-relaxed break-all font-mono border border-white/5">
+                                                        <div className="flex items-center gap-2 mb-2">
+                                                            <span className="text-[9px] bg-gold/10 text-gold px-1 rounded border border-gold/20">LEADER</span>
+                                                            <span className="text-xs text-gray-200 font-medium">{vh.leader}</span>
+                                                        </div>
+                                                        {/* 投票の内訳を見やすく整理 */}
+                                                        <div className="text-[9px] text-gray-400 bg-black/40 p-2 rounded leading-relaxed font-mono border border-white/5">
+                                                            <div className="text-gold/50 mb-1 uppercase text-[8px] tracking-tighter">Vote Breakdown</div>
                                                             {vh.details}
                                                         </div>
                                                     </div>
@@ -1081,29 +1227,45 @@
                             </div>
                         </div>
                     )}
+
                     {/* 役職ヘルプモーダル */}
                     {showHelp && (
                         <div className="fixed inset-0 z-50 flex items-center justify-center p-6">
                             <div className="absolute inset-0 bg-black/90 backdrop-blur-sm" onClick={() => setShowHelp(false)}></div>
-                            <div className="relative bg-[#1a1a1e] border-2 border-[#c5a059] p-6 w-full max-w-sm shadow-[0_0_50px_rgba(197,160,89,0.2)]">
-                                <h4 className="font-cinzel gold-text text-xl mb-2">{gameState.playerMap?.[myName]}の導き</h4>
-                                <p className="text-sm text-gray-300 leading-relaxed mb-6">
+                            <div className="relative bg-[#1a1a1e] border-2 border-[#c5a059] p-6 w-full max-w-sm shadow-[0_0_50px_rgba(197,160,89,0.2)] animate-fadeIn">
+                                {/* 役職名と解説 */}
+                                <h4 className="font-cinzel gold-text text-xl mb-1 tracking-wider">{gameState.playerMap?.[myName]}</h4>
+                                <p className="text-[10px] text-gold/60 uppercase tracking-widest mb-3 border-b border-gold/20 pb-1">Role Instruction</p>
+
+                                <p className="text-sm text-gray-300 leading-relaxed mb-6 italic">
                                     {ROLE_HELP[gameState.playerMap?.[myName]]}
                                 </p>
 
-                                <div className="space-y-2 mb-6">
-                                    <p className="text-[10px] text-gold uppercase tracking-tighter border-b border-gold/30">陣営の相関</p>
-                                    <div className="text-[11px] text-gray-400">
-                                        {gameState.playerMap?.[myName] === 'マーリン' && "見える相手: 暗殺者, モルガナ, オベロン"}
-                                        {gameState.playerMap?.[myName] === 'パーシヴァル' && "見える相手: マーリン, モルガナ"}
-                                        {['暗殺者', 'モルガナ', 'モードレッド'].includes(gameState.playerMap?.[myName]) && "見える相手: 邪悪な仲間（オベロン以外）"}
-                                        {['忠臣', 'オベロン'].includes(gameState.playerMap?.[myName]) && "見える相手: なし"}
+                                {/* 陣営の相関（ナレッジ）部分を整理 */}
+                                <div className="space-y-3 mb-8 bg-black/40 p-3 border border-white/5 rounded">
+                                    <p className="text-[10px] text-gold uppercase tracking-tighter flex items-center gap-2">
+                                        <span className="w-1 h-1 bg-gold rotate-45"></span> 啓示される情報
+                                    </p>
+
+                                    <div className="text-xs leading-relaxed">
+                                        {gameState.playerMap?.[myName] === 'マーリン' && (
+                                            <p className="text-red-400">邪悪な者の正体を知っている。<br /><span className="text-[10px] text-gray-500">※モードレッドの姿は見えません。</span></p>
+                                        )}
+                                        {gameState.playerMap?.[myName] === 'パーシヴァル' && (
+                                            <p className="text-blue-400">マーリンを自称する者（マーリンとモルガナ）が見える。</p>
+                                        )}
+                                        {['暗殺者', 'モルガナ', 'モードレッド'].includes(gameState.playerMap?.[myName]) && (
+                                            <p className="text-red-400">自分以外の邪悪な仲間の正体を知っている。<br /><span className="text-[10px] text-gray-500">※オベロンの姿は見えません。</span></p>
+                                        )}
+                                        {['忠臣', 'オベロン'].includes(gameState.playerMap?.[myName]) && (
+                                            <p className="text-gray-500">あなたに与えられる予備知識はありません。</p>
+                                        )}
                                     </div>
                                 </div>
 
                                 <button
                                     onClick={() => setShowHelp(false)}
-                                    className="w-full py-2 bg-gold text-black font-bold text-sm uppercase"
+                                    className="w-full py-3 bg-gradient-to-b from-[#c5a059] to-[#8e6d2f] text-black font-bold text-xs uppercase tracking-[0.2em] hover:brightness-125 transition-all shadow-lg"
                                 >
                                     閉じる
                                 </button>
@@ -1144,17 +1306,34 @@
 
                     {/* 投票結果の全画面演出 */}
                     {isRevealingVote && (
-                        <div className="fixed inset-0 z-[280] flex flex-col items-center justify-center animate-fadeIn backdrop-blur-sm bg-black/40">
-                            <div className={`transform scale-150 p-8 rounded-lg border-2 shadow-[0_0_50px_rgba(0,0,0,0.5)] ${lastVoteStatus === 'approved' // ここが 'approved' なら青
-                                ? 'bg-blue-900/90 border-blue-400 text-blue-100'
-                                : 'bg-red-900/90 border-red-500 text-red-100'   // それ以外（rejected）なら赤
-                                }`}>
-                                <h2 className="font-cinzel text-4xl tracking-[0.4em] font-bold animate-cardReveal">
+                        <div className="fixed inset-0 z-[280] flex flex-col items-center justify-center animate-fadeIn backdrop-blur-md bg-black/60">
+                            {/* max-w-xs (約320px) に制限し、横幅が広がりすぎないように設定 */}
+                            <div className={`relative w-[85%] max-w-xs transition-all duration-700 p-6 border-t border-b border-white/20 shadow-[0_0_50px_rgba(0,0,0,0.8)] flex flex-col items-center
+            ${lastVoteStatus === 'approved'
+                                    ? 'bg-blue-950/90 shadow-blue-900/20'
+                                    : 'bg-red-950/90 shadow-red-900/20'
+                                }`}
+                            >
+                                {/* 装飾用角パーツ（上下） */}
+                                <div className={`absolute top-0 left-0 w-2 h-2 border-t border-l ${lastVoteStatus === 'approved' ? 'border-blue-400' : 'border-red-500'}`}></div>
+                                <div className={`absolute bottom-0 right-0 w-2 h-2 border-b border-r ${lastVoteStatus === 'approved' ? 'border-blue-400' : 'border-red-500'}`}></div>
+
+                                <h2 className={`font-cinzel text-3xl tracking-[0.3em] font-bold animate-cardReveal
+                ${lastVoteStatus === 'approved' ? 'text-blue-100 text-success-glow' : 'text-red-100 text-fail-glow'}`}
+                                >
                                     {lastVoteStatus === 'approved' ? 'APPROVED' : 'REJECTED'}
                                 </h2>
-                                <p className="text-[10px] mt-2 tracking-[0.2em] opacity-80 uppercase text-center">
-                                    {lastVoteStatus === 'approved' ? '遠征部隊、出発' : '提案は退けられた'}
+
+                                <p className="text-[10px] mt-4 tracking-[0.2em] font-bold uppercase text-white/80 animate-pulse">
+                                    {lastVoteStatus === 'approved' ? '— 遠征部隊、出発 —' : '— 提案は退けられた —'}
                                 </p>
+                            </div>
+
+                            {/* 背景の光の筋（さらに細く） */}
+                            <div className={`absolute inset-0 -z-10 opacity-30 pointer-events-none 
+            ${lastVoteStatus === 'approved'
+                                    ? 'bg-[radial-gradient(circle,rgba(59,130,246,0.15)_0%,transparent_70%)]'
+                                    : 'bg-[radial-gradient(circle,rgba(239,68,68,0.15)_0%,transparent_70%)]'}`}>
                             </div>
                         </div>
                     )}
@@ -1207,9 +1386,9 @@
                                 {/* カットイン */}
                                 <div className="animate-revealIdentity">
                                     <p className="text-gold text-xs tracking-[0.5em] mb-2 uppercase">Assassination in Progress</p>
-                                    <h2 className="text-6xl font-cinzel font-bold text-white tracking-tighter">
-                                        TARGET: <span className="text-red-600 underline">{gameState.assassinationTarget}</span>
-                                    </h2>
+                                    <h3 className="text-6xl font-cinzel font-bold text-white tracking-tighter">
+                                        ターゲット: <span className="text-red-600">{gameState.assassinationTarget}</span>
+                                    </h3>
                                 </div>
 
                                 {/* 運命のタメ（プログレスバー） */}
@@ -1218,7 +1397,7 @@
                                 </div>
 
                                 <div className="text-white font-bold italic animate-pulse tracking-widest text-lg">
-                                    CHECKING IDENTITY...
+                                    暗殺に向けて出発...
                                 </div>
                             </div>
 
@@ -1245,17 +1424,20 @@
                                 <div className="py-2 px-4 bg-white/5 rounded-full inline-block border border-white/10">
                                     <p className="text-[10px] text-gray-400 uppercase tracking-[0.2em]">
                                         {gameState.winner === 'EVIL' ? (
-                                            gameState.questResults?.filter(r => r === 'fail').length >= 3
-                                                ? "📜 遠征失敗による敗北"
+                                            // 邪悪勝利の場合
+                                            gameState.assassinationResult === 'success'
+                                                ? "🔪 暗殺成功：マーリンは討ち取られた"
                                                 : gameState.voteCount >= 5
                                                     ? "⚖️ 5回連続の提案却下"
-                                                    : "🔪 マーリンが暗殺された"
+                                                    : "📜 遠征失敗による敗北"
                                         ) : (
-                                            "🛡️ 遠征成功 ＆ 暗殺回避"
+                                            // 正義勝利の場合
+                                            gameState.assassinationResult === 'fail'
+                                                ? "🛡️ 暗殺失敗：正義は守られた"
+                                                : "⚔️ 聖戦完遂による勝利"
                                         )}
                                     </p>
                                 </div>
-
                                 {/* 真実の記録（プレイヤーリスト） */}
                                 <div className="bg-black/60 p-4 rounded-lg border border-white/10 space-y-2">
                                     <p className="text-[10px] text-gold/60 uppercase tracking-widest mb-3 border-b border-white/10 pb-1">Archive of Truth</p>
@@ -1273,27 +1455,11 @@
 
                                 {/* 豪華なリザルト画面の中 */}
                                 <div className="flex flex-col gap-3 w-full mt-6">
-                                    {/* 古い RETURN TO COMMAND ボタンを消して、これに差し替える */}
-                                    <button
-                                        onClick={handleRematch}
-                                        disabled={wantsRematch}
-                                        className={`w-full py-4 rounded font-cinzel text-xs tracking-[0.3em] font-bold transition-all border shadow-lg ${wantsRematch
-                                                ? 'bg-gray-600/50 border-gray-500 text-gray-400 cursor-not-allowed'
-                                                : gameState.winner === 'GOOD'
-                                                    ? 'bg-blue-600/20 border-blue-400 text-blue-100 hover:bg-blue-600/40'
-                                                    : 'bg-red-600/20 border-red-500 text-red-100 hover:bg-red-600/40'
-                                            }`}
-                                    >
-                                        {wantsRematch
-                                            ? `WAITING... (${Object.keys(gameState.rematchVotes || {}).length}/${gameState.playerList.length})`
-                                            : 'REMATCH (全員同意で開始)'}
-                                    </button>
-
                                     <button
                                         onClick={handleReset}
-                                        className="w-full py-2 text-gray-500 font-cinzel text-[10px] tracking-widest hover:text-white transition-all opacity-60 hover:opacity-100"
+                                        className="w-full py-3 mt-4 bg-white/5 border border-white/20 text-gray-300 font-cinzel text-xs tracking-[0.2em] hover:bg-white/10 hover:text-white hover:border-white/40 transition-all rounded"
                                     >
-                                        EXIT TO TITLE
+                                        タイトルへ戻る
                                     </button>
                                 </div>
                             </div>
