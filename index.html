@@ -225,6 +225,7 @@
             const [showHistoryModal, setShowHistoryModal] = useState(false);
             const [showHelp, setShowHelp] = useState(false);
             const [isRevealingRole, setIsRevealingRole] = useState(false);
+            const [showEndResult, setShowEndResult] = useState(true);
             const [isRevealingVote, setIsRevealingVote] = useState(false);
             const [lastVoteStatus, setLastVoteStatus] = useState(null);
             const [isAssassinating, setIsAssassinating] = useState(false);
@@ -237,6 +238,9 @@
             const [isHost, setIsHost] = useState(false);
             const [selectedRoles, setSelectedRoles] = useState(['マーリン', '暗殺者', 'パーシヴァル', 'モルガナ', '忠臣']);
 
+            const [discussionTime, setDiscussionTime] = useState(300); // 初期値：5分（300秒）
+            const [timeLeft, setTimeLeft] = useState(null); // 表示用の残り時間
+
             const pCount = gameState?.playerList?.length || Object.keys(gameState?.players || {}).length || 5;
 
             // --- 3. 共通DB処理 ---
@@ -246,9 +250,13 @@
             };
 
             const addLog = (msg) => {
+                // 既存のログを取得（なければ空配列）
                 const currentLogs = gameState?.logs || [];
                 const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                return [`[${time}] ${msg}`, ...currentLogs].slice(0, 20);
+                const newEntry = `[${time}] ${msg}`;
+
+                // 新しいエントリーを先頭に結合し、最新20件を残す
+                return [newEntry, ...currentLogs].slice(0, 20);
             };
 
             // --- 4. 副作用 (Firebase監視 & 演出同期) ---
@@ -289,6 +297,25 @@
                 setSelectedRoles(roles);
             }, [pCount, gameState?.started]);
 
+            // ホストを判定ロジック
+            useEffect(() => {
+                if (!roomCode || !isJoined) return;
+                const roomRef = window.fb.ref(window.fb.db, `rooms/${roomCode}`);
+                const unsubscribe = window.fb.onValue(roomRef, (snapshot) => {
+                    const data = snapshot.val();
+                    if (data) {
+                        setGameState(data);
+                        // DBに記録されているホスト名と自分の名前が一致するかで判定
+                        if (data.host === myName) {
+                            setIsHost(true);
+                        } else {
+                            setIsHost(false); // 他の人がホストなら自分は解除する
+                        }
+                    }
+                });
+                return () => unsubscribe();
+            }, [roomCode, isJoined, myName]);
+
             // 【重要】ホストの編集内容をリアルタイムでFirebaseへ送信する
             useEffect(() => {
                 // ホストであり、まだゲーム開始前で、かつ入室済みの場合のみ同期
@@ -299,6 +326,73 @@
                     });
                 }
             }, [gameConfig, selectedRoles, isHost]); // 設定が変わるたびに実行
+
+            // タイマー開始（ホストのみ実行）
+            const startDiscussionTimer = (seconds) => {
+                if (!isHost) return;
+                const endTime = Date.now() + (seconds * 1000);
+                dbUpdate({ discussionEndTime: endTime });
+            };
+
+            // タイマー停止（ホストのみ実行）
+            const stopDiscussionTimer = () => {
+                if (!isHost) return;
+                dbUpdate({ discussionEndTime: null });
+            };
+
+            // タイマーの同期とカウントダウン
+            useEffect(() => {
+                const timer = setInterval(() => {
+                    if (gameState?.discussionEndTime) {
+                        const remaining = Math.max(0, Math.floor((gameState.discussionEndTime - Date.now()) / 1000));
+                        setTimeLeft(remaining);
+
+                        // 終了時の処理（任意でSEを鳴らすなど）
+                        if (remaining === 0) {
+                            // 終了後の処理
+                        }
+                    } else {
+                        setTimeLeft(null);
+                    }
+                }, 500); // 0.5秒ごとに計算（よりスムーズに）
+
+                return () => clearInterval(timer);
+            }, [gameState?.discussionEndTime]);
+
+            // App内のuseEffect（Firebase監視部分）を以下に差し替え
+            useEffect(() => {
+                if (!roomCode || !isJoined) return;
+                const roomRef = window.fb.ref(window.fb.db, `rooms/${roomCode}`);
+                const unsubscribe = window.fb.onValue(roomRef, (snapshot) => {
+                    const data = snapshot.val();
+                    if (data) {
+                        // 1. まずデータをセット
+                        setGameState(data);
+
+                        // 2. 除外判定：ゲーム開始前で、かつ既に自分が入室済みだったのにリストから消えた場合のみ発動
+                        // data.playersがnull（部屋リセット時）の場合は除外扱いしない
+                        if (!data.started && data.players) {
+                            const isMeInList = Object.keys(data.players).includes(myName);
+                            // 以前はリストにいた（gameStateがある）のに、今はいない場合
+                            if (gameState && !isMeInList) {
+                                alert("遠征軍から除外されました。");
+                                setIsJoined(false);
+                                return;
+                            }
+                        }
+
+                        // 3. ホスト判定
+                        const playerNames = Object.keys(data.players || {});
+                        if (data.host === myName || (!data.host && playerNames[0] === myName)) {
+                            if (!data.host) window.fb.update(roomRef, { host: myName });
+                            setIsHost(true);
+                        } else {
+                            setIsHost(false);
+                        }
+                    }
+                });
+                return () => unsubscribe();
+            }, [roomCode, isJoined, myName, gameState]); // gameStateを依存関係に追加
 
             // ゲーム開始を検知して、全員一斉に役職演出（Identity Assigned）を開始する
             useEffect(() => {
@@ -349,7 +443,16 @@
                 localStorage.setItem('avalon_room', roomCode);
                 localStorage.setItem('avalon_name', myName);
                 setIsJoined(true);
-                window.fb.set(window.fb.ref(window.fb.db, `rooms/${roomCode}/players/${myName}`), { joined: true });
+
+                const roomRef = window.fb.ref(window.fb.db, `rooms/${roomCode}`);
+                window.fb.onValue(roomRef, (snapshot) => {
+                    const data = snapshot.val();
+                    // 部屋がまだ存在しない、またはホストがいない場合は自分がホストになる
+                    if (!data || !data.host) {
+                        window.fb.update(roomRef, { host: myName });
+                    }
+                    window.fb.set(window.fb.ref(window.fb.db, `rooms/${roomCode}/players/${myName}`), { joined: true });
+                }, { onlyOnce: true }); // 最初の一回だけ確認
             };
             const confirmSettings = () => {
                 // 人数チェック
@@ -359,6 +462,16 @@
                 // モーダルを開く
                 setShowStartConfirm(true);
             };
+
+            const kickPlayer = (targetName) => {
+                if (!isHost || targetName === myName) return; // 自分自身はキック不可
+                if (window.confirm(`${targetName} を遠征軍から除外しますか？`)) {
+                    // Firebaseから特定のプレイヤーを削除
+                    window.fb.remove(window.fb.ref(window.fb.db, `rooms/${roomCode}/players/${targetName}`));
+                    addLog(`${targetName} がホストによって除外されました`);
+                }
+            };
+
             const startGame = () => {
                 const players = Object.keys(gameState.players);
                 // 人数と選択された役職数が一致しているかチェック
@@ -545,6 +658,7 @@
             const handleReset = () => {
                 if (confirm("ゲームを完全にリセットしますか？")) {
                     sessionStorage.removeItem(`revealed_${roomCode}`);
+                    setShowEndResult(true);
                     window.fb.remove(window.fb.ref(window.fb.db, `rooms/${roomCode}`));
                     location.reload();
                 }
@@ -633,29 +747,39 @@
                                         <div
                                             key={name}
                                             className={`flex items-center justify-between px-4 py-3 border-l-2 animate-fadeIn transition-all duration-500
-                        ${name === myName
+    ${name === myName
                                                     ? 'bg-gold/10 border-gold shadow-[inset_4px_0_10px_rgba(197,160,89,0.1)]'
                                                     : 'bg-white/5 border-white/10 hover:bg-white/10'}`}
                                             style={{ animationDelay: `${idx * 0.1}s` }}
                                         >
                                             <div className="flex items-center gap-3">
-                                                {/* 騎士の紋章代わりのドット演出 */}
                                                 <div className={`w-1.5 h-1.5 rotate-45 ${name === myName ? 'bg-gold animate-pulse' : 'bg-gold/30'}`}></div>
-
                                                 <span className={`text-sm tracking-widest font-bold ${name === myName ? 'text-gold' : 'text-gray-300'}`}>
                                                     {name}
                                                 </span>
                                             </div>
 
-                                            {name === myName ? (
-                                                <span className="text-[8px] font-cinzel text-gold border border-gold/30 px-1.5 py-0.5 rounded-sm tracking-widest">
-                                                    YOU
-                                                </span>
-                                            ) : (
-                                                <span className="text-[8px] font-cinzel text-gray-600 tracking-widest uppercase font-bold">
-                                                    Knight
-                                                </span>
-                                            )}
+                                            <div className="flex items-center gap-3">
+                                                {/* ホスト権限：自分以外のプレイヤーに「除外」ボタンを表示 */}
+                                                {isHost && name !== myName && (
+                                                    <button
+                                                        onClick={() => kickPlayer(name)}
+                                                        className="text-[7px] border border-red-900/50 px-1.5 py-0.5 rounded bg-red-950/20 text-red-500 hover:bg-red-600 hover:text-white transition-all uppercase font-bold tracking-tighter"
+                                                    >
+                                                        Kick
+                                                    </button>
+                                                )}
+
+                                                {name === myName ? (
+                                                    <span className="text-[8px] font-cinzel text-gold border border-gold/30 px-1.5 py-0.5 rounded-sm tracking-widest">
+                                                        YOU
+                                                    </span>
+                                                ) : (
+                                                    <span className="text-[8px] font-cinzel text-gray-600 tracking-widest uppercase font-bold">
+                                                        Knight
+                                                    </span>
+                                                )}
+                                            </div>
                                         </div>
                                     ))
 
@@ -1101,6 +1225,35 @@
                                     )}
                                 </div>
 
+                                {/* 討論用タイマーUI */}
+                                <div className="bg-black/60 p-3 rounded border border-white/5 mb-4 flex items-center justify-between">
+                                    <div className="flex items-center gap-3">
+                                        <div className={`w-2 h-2 rounded-full ${timeLeft > 0 ? 'bg-red-500 animate-pulse shadow-[0_0_8px_rgba(239,68,68,0.5)]' : 'bg-gray-600'}`}></div>
+                                        <div className="flex flex-col">
+                                            <span className="text-[9px] text-gray-500 uppercase font-black tracking-widest">Discussion Time</span>
+                                            <span className="text-xl font-cinzel font-bold text-white tracking-widest">
+                                                {timeLeft !== null
+                                                    ? `${Math.floor(timeLeft / 60)}:${String(timeLeft % 60).padStart(2, '0')}`
+                                                    : "--:--"}
+                                            </span>
+                                        </div>
+                                    </div>
+
+                                    {/* ホスト専用：タイマー操作パネル */}
+                                    {isHost && (
+                                        <div className="flex gap-2">
+                                            {!gameState?.discussionEndTime ? (
+                                                <>
+                                                    <button onClick={() => startDiscussionTimer(180)} className="px-2 py-1 text-[8px] border border-gold/30 text-gold rounded hover:bg-gold/10 transition-all">3min</button>
+                                                    <button onClick={() => startDiscussionTimer(300)} className="px-2 py-1 text-[8px] border border-gold/30 text-gold rounded hover:bg-gold/10 transition-all">5min</button>
+                                                </>
+                                            ) : (
+                                                <button onClick={stopDiscussionTimer} className="px-3 py-1 text-[8px] border border-red-500/50 text-red-500 rounded bg-red-900/10 hover:bg-red-900/20 transition-all uppercase font-bold">Stop</button>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+
                                 {/* プレイヤーリスト */}
                                 <div className="p-3 flex flex-wrap gap-2 justify-center">
                                     {gameState.playerList?.map(p => {
@@ -1527,12 +1680,19 @@
                                             </div>
 
                                             {/* 帰還アクション */}
-                                            <div className="pt-4">
+                                            <div className="pt-4 space-y-3">
+                                                <button
+                                                    onClick={() => setShowEndResult(false)}
+                                                    className="w-full py-3 bg-blue-900/20 border border-blue-500/40 text-blue-200 font-bold text-[10px] tracking-[0.2em] hover:bg-blue-600/20 transition-all rounded-sm uppercase"
+                                                >
+                                                    戦績を詳しく確認する (演出を閉じる)
+                                                </button>
+
                                                 <button
                                                     onClick={handleReset}
-                                                    className="w-full py-4 bg-white/5 border border-white/20 text-gray-400 font-cinzel text-[10px] tracking-[0.5em] hover:bg-white/10 hover:text-white hover:border-white/40 transition-all rounded-sm uppercase font-bold"
+                                                    className="w-full py-4 bg-white/5 border border-white/20 text-gray-400 font-cinzel text-[10px] tracking-[0.5em] hover:bg-white/10 hover:text-white transition-all rounded-sm uppercase font-bold"
                                                 >
-                                                    Return to Title
+                                                    タイトルへ戻る
                                                 </button>
                                             </div>
                                         </div>
@@ -1555,14 +1715,14 @@
                                     <div className="absolute inset-0 opacity-[0.02] pointer-events-none bg-[length:20px_20px] bg-[linear-gradient(to_right,#fff_1px,transparent_1px),linear-gradient(to_bottom,#fff_1px,transparent_1px)]"></div>
 
                                     <div className="relative z-10">
-                                        {gameState.logs?.slice().reverse().map((l, i) => (
+                                        {gameState.logs?.map((l, i) => (
                                             <div
                                                 key={i}
                                                 className={`border-b border-white/[0.03] pb-1.5 mb-1.5 transition-all duration-500 ${i === 0 ? 'text-gold brightness-125 animate-fadeIn' : 'text-gray-500'
                                                     }`}
                                             >
                                                 <div className="flex gap-2 items-start">
-                                                    {/* タイムスタンプの代わりに表示する「>」記号 */}
+                                                    {/* 配列の0番目（最新）にだけ「▶」を表示 */}
                                                     <span className={`text-[8px] mt-0.5 ${i === 0 ? 'text-gold' : 'text-gold/20'}`}>
                                                         {i === 0 ? '▶' : '▷'}
                                                     </span>
