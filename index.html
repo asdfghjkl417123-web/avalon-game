@@ -219,6 +219,7 @@
             // --- 2. 状態管理 (UI制御・演出フラグ) ---
             const [selectedPlayers, setSelectedPlayers] = useState([]);
             const [showStartConfirm, setShowStartConfirm] = useState(false);
+            const [hasSeenRole, setHasSeenRole] = useState(false);
             const [hasActioned, setHasActioned] = useState(false);
             const [displayResults, setDisplayResults] = useState([]);
             const [revealing, setRevealing] = useState(false);
@@ -237,11 +238,14 @@
             const [gameConfig, setGameConfig] = useState(DEFAULT_CONFIG);
             const [isHost, setIsHost] = useState(false);
             const [selectedRoles, setSelectedRoles] = useState(['マーリン', '暗殺者', 'パーシヴァル', 'モルガナ', '忠臣']);
+            const [assassinationTarget, setAssassinationTarget] = useState(null);
 
             const [discussionTime, setDiscussionTime] = useState(300); // 初期値：5分（300秒）
             const [timeLeft, setTimeLeft] = useState(null); // 表示用の残り時間
 
             const pCount = gameState?.playerList?.length || Object.keys(gameState?.players || {}).length || 5;
+
+            const prevStartedRef = React.useRef(false);
 
             // --- 3. 共通DB処理 ---
             const dbUpdate = (updates) => {
@@ -396,16 +400,18 @@
 
             // ゲーム開始を検知して、全員一斉に役職演出（Identity Assigned）を開始する
             useEffect(() => {
-                if (gameState?.started && !sessionStorage.getItem(`revealed_${roomCode}`)) {
+                // データがまだ届いていない場合は何もしない
+                if (!gameState) return;
+
+                // 前回の状態が false で、現在の状態が true の時（＝「聖戦開始」が押された瞬間）だけ実行
+                if (gameState.started && !prevStartedRef.current) {
                     setIsRevealingRole(true);
-                    // 一度表示したら、そのセッション中は再表示されないようにする（リロード対策）
-                    sessionStorage.setItem(`revealed_${roomCode}`, 'true');
                 }
-                // ゲームがリセットされたら、フラグもリセット
-                if (!gameState?.started) {
-                    sessionStorage.removeItem(`revealed_${roomCode}`);
-                }
+
+                // 現在の状態を保存しておく（リロードしても、Firebaseからデータが来た瞬間にこれが更新される）
+                prevStartedRef.current = !!gameState.started;
             }, [gameState?.started]);
+
             // 演出同期: 投票結果
             useEffect(() => {
                 if (gameState?.lastVoteId && gameState?.lastVoteStatus) {
@@ -1301,6 +1307,24 @@
 
                             {/* メインアクションエリア */}
                             <div className="bg-dark-card p-5 rounded-lg border-l-4 border-[#c5a059] shadow-xl min-h-[160px] flex flex-col justify-center">
+                                {gameState.phase === 'end' && !showEndResult && (
+                                    <div className="mb-6 animate-fadeIn">
+                                        <div className={`p-4 rounded-sm border-2 text-center mb-4 ${gameState.winner === 'GOOD' ? 'border-blue-500/30 bg-blue-900/10' : 'border-red-600/30 bg-red-900/10'
+                                            }`}>
+                                            <h4 className="text-sm font-bold text-white mb-1">
+                                                {gameState.winner === 'GOOD' ? '【勝利】正義の軍勢' : '【勝利】邪悪な勢力'}
+                                            </h4>
+                                            <p className="text-[9px] text-gray-500 italic uppercase tracking-widest">The Battle has ended.</p>
+                                        </div>
+
+                                        <button
+                                            onClick={() => setShowEndResult(true)}
+                                            className="w-full py-3 bg-gold/10 border border-gold/40 text-gold text-[10px] font-bold tracking-widest uppercase hover:bg-gold/20 transition-all shadow-lg"
+                                        >
+                                            リザルト演出を再表示
+                                        </button>
+                                    </div>
+                                )}
                                 {gameState.phase === 'propose' && (
                                     <div className="space-y-5">
                                         <div className="text-center space-y-1">
@@ -1581,7 +1605,7 @@
                                                         {gameState.playerList.filter(p => p !== myName).map(p => (
                                                             <button
                                                                 key={p}
-                                                                onClick={() => executeAssassination(p)}
+                                                                onClick={() => setAssassinationTarget(p)}
                                                                 className="group relative py-3 bg-black border border-red-900/50 rounded-sm overflow-hidden transition-all hover:border-red-500 active:scale-95 shadow-lg"
                                                             >
                                                                 {/* ホバー時の照準演出 */}
@@ -1615,21 +1639,19 @@
                                     </div>
                                 )}
 
-                                {/* 最終結果（勝敗決定）の豪華演出 */}
-                                {gameState?.phase === 'end' && (
-                                    <div className="fixed inset-0 z-[800] bg-[#050505]/98 flex flex-col items-center justify-center p-6 animate-fadeIn backdrop-blur-xl overflow-hidden">
+                                {/* 最終結果（勝敗決定）の豪華統合演出 */}
+                                {gameState?.phase === 'end' && showEndResult && (
+                                    <div className="fixed inset-0 z-[1200] bg-[#050505]/98 flex flex-col items-center justify-center p-6 animate-fadeIn backdrop-blur-xl overflow-hidden">
 
-                                        {/* 背景：勝敗に応じた環境光 */}
+                                        {/* 背景：勝敗に応じた環境光（統合されたエフェクト） */}
                                         <div className={`absolute inset-0 opacity-20 blur-[100px] pointer-events-none ${gameState.winner === 'GOOD' ? 'bg-blue-600' : 'bg-red-600'
                                             }`}></div>
 
-                                        <div className={`relative z-10 text-center space-y-8 max-w-sm w-full p-8 border-t border-b border-white/10 relative shadow-[0_0_100px_rgba(0,0,0,1)]`}>
+                                        <div className="relative z-10 text-center space-y-6 max-w-sm w-full p-8 border-t border-b border-white/10 shadow-[0_0_100px_rgba(0,0,0,1)]">
 
                                             {/* メインタイトル */}
                                             <div className="space-y-4 animate-revealIdentity">
-                                                <p className={`text-6xl font-cinzel tracking-[0.2em] font-bold ${gameState.winner === 'GOOD'
-                                                    ? 'text-blue-400 text-success-glow'
-                                                    : 'text-red-600 text-fail-glow animate-shake'
+                                                <p className={`text-6xl font-cinzel tracking-[0.2em] font-bold ${gameState.winner === 'GOOD' ? 'text-blue-400 text-success-glow' : 'text-red-600 text-fail-glow animate-shake'
                                                     }`}>
                                                     {gameState.winner === 'GOOD' ? 'VICTORY' : 'DEFEAT'}
                                                 </p>
@@ -1645,32 +1667,30 @@
                                             <div className="relative py-3 px-6 bg-white/[0.03] border border-white/10 inline-block shadow-inner">
                                                 <p className="text-[11px] text-gold/80 font-bold tracking-[0.2em] leading-relaxed">
                                                     {gameState.winner === 'EVIL' ? (
-                                                        gameState.questResults?.filter(r => r === 'fail').length >= 3
-                                                            ? "遠征は失敗を重ね、王国の灯火は潰えた"
-                                                            : "暗殺者の刃が、キャメロットの予言者を貫いた"
+                                                        gameState.assassinationResult === 'success'
+                                                            ? "暗殺者の刃が、キャメロットの予言者を貫いた"
+                                                            : "遠征は失敗を重ね、王国の灯火は潰えた"
                                                     ) : (
                                                         "遠征は完遂され、真実の盾が予言者を守り抜いた"
                                                     )}
                                                 </p>
                                             </div>
 
-                                            {/* 真実の記録：Archive of Truth */}
+                                            {/* 真実の記録：Archive of Truth（データ統合部分） */}
                                             <div className="bg-black/60 p-5 rounded-sm border border-white/10 space-y-4 shadow-2xl">
                                                 <div className="flex items-center justify-between border-b border-white/10 pb-2">
                                                     <span className="text-[9px] text-gold/60 font-cinzel tracking-[0.2em] uppercase font-bold">Archive of Truth</span>
                                                     <span className="text-[8px] text-gray-600 tracking-widest uppercase font-bold">真実の記録</span>
                                                 </div>
-                                                <div className="space-y-2 max-h-[30vh] overflow-y-auto custom-scrollbar pr-2 text-left">
-                                                    {Object.entries(gameState.playerMap).map(([name, role]) => (
+                                                <div className="space-y-2 max-h-[25vh] overflow-y-auto custom-scrollbar pr-2 text-left">
+                                                    {Object.entries(gameState.playerMap || {}).map(([name, role]) => (
                                                         <div key={name} className="flex justify-between items-center border-b border-white/5 py-2 group">
                                                             <div className="flex items-center gap-2">
-                                                                <div className={`w-1 h-1 rotate-45 ${['暗殺者', 'モルガナ', 'モードレッド', 'オベロン'].includes(role)
-                                                                    ? 'bg-red-600' : 'bg-blue-500'
+                                                                <div className={`w-1 h-1 rotate-45 ${['暗殺者', 'モルガナ', 'モードレッド', 'オベロン'].includes(role) ? 'bg-red-600' : 'bg-blue-500'
                                                                     }`}></div>
                                                                 <span className="text-gray-200 text-sm font-medium tracking-wider group-hover:text-white transition-colors">{name}</span>
                                                             </div>
-                                                            <span className={`font-cinzel text-xs font-black tracking-widest ${['暗殺者', 'モルガナ', 'モードレッド', 'オベロン'].includes(role)
-                                                                ? 'text-red-500' : 'text-blue-400'
+                                                            <span className={`font-cinzel text-xs font-black tracking-widest ${['暗殺者', 'モルガナ', 'モードレッド', 'オベロン'].includes(role) ? 'text-red-500' : 'text-blue-400'
                                                                 }`}>
                                                                 {role}
                                                             </span>
@@ -1679,18 +1699,18 @@
                                                 </div>
                                             </div>
 
-                                            {/* 帰還アクション */}
+                                            {/* アクションボタン */}
                                             <div className="pt-4 space-y-3">
                                                 <button
                                                     onClick={() => setShowEndResult(false)}
-                                                    className="w-full py-3 bg-blue-900/20 border border-blue-500/40 text-blue-200 font-bold text-[10px] tracking-[0.2em] hover:bg-blue-600/20 transition-all rounded-sm uppercase"
+                                                    className="w-full py-3 bg-blue-900/20 border border-blue-500/40 text-blue-200 font-bold text-[10px] tracking-[0.2em] hover:bg-blue-600/30 transition-all rounded-sm uppercase active:scale-95"
                                                 >
                                                     戦績を詳しく確認する (演出を閉じる)
                                                 </button>
 
                                                 <button
                                                     onClick={handleReset}
-                                                    className="w-full py-4 bg-white/5 border border-white/20 text-gray-400 font-cinzel text-[10px] tracking-[0.5em] hover:bg-white/10 hover:text-white transition-all rounded-sm uppercase font-bold"
+                                                    className="w-full py-4 bg-white/5 border border-white/20 text-gray-400 font-cinzel text-[10px] tracking-[0.5em] hover:bg-red-900/20 hover:text-red-400 transition-all rounded-sm uppercase font-bold"
                                                 >
                                                     タイトルへ戻る
                                                 </button>
@@ -2086,13 +2106,13 @@
                                     <div className="h-[2px] w-32 bg-gradient-to-r from-transparent via-gold to-transparent mx-auto"></div>
                                 </div>
 
-                                {/* メインタイトル：圧倒的な存在感 */}
-                                <div className="relative py-4">
-                                    <h2 className="text-7xl md:text-8xl font-cinzel font-bold text-white italic tracking-tighter animate-revealIdentity drop-shadow-[0_0_30px_rgba(255,255,255,0.4)]">
+                                {/* メインタイトル：圧倒的な存在感（中央揃え・レスポンシブ対応） */}
+                                <div className="relative py-4 w-full flex flex-col items-center justify-center">
+                                    <h2 className="text-4xl sm:text-6xl md:text-8xl font-cinzel font-bold text-white italic tracking-[0.1em] sm:tracking-tighter animate-revealIdentity drop-shadow-[0_0_30px_rgba(255,255,255,0.4)] text-center leading-tight">
                                         運命の審判
                                     </h2>
-                                    {/* 文字の後ろで輝く後光 */}
-                                    <div className="absolute inset-0 -z-10 bg-gold/20 blur-[60px] animate-pulse"></div>
+                                    {/* 文字の後ろで輝く後光：幅を文字に合わせる */}
+                                    <div className="absolute inset-0 -z-10 bg-gold/20 blur-[60px] animate-pulse max-w-xs mx-auto"></div>
                                 </div>
 
                                 {/* 中央：二つの勢力の激突を象徴する回転体 */}
@@ -2153,17 +2173,21 @@
                                     <div className="absolute top-4 w-10 h-[1px] bg-red-800"></div>
                                 </div>
 
-                                <div className="space-y-3">
-                                    <h2 className="text-white font-cinzel text-4xl tracking-[0.4em] font-bold drop-shadow-[0_0_15px_rgba(255,0,0,0.5)]">
+                                <div className="w-full flex flex-col items-center justify-center px-4 space-y-2">
+                                    {/* メインタイトル */}
+                                    <h2 className="text-white font-cinzel text-2xl sm:text-3xl md:text-4xl tracking-[0.2em] sm:tracking-[0.4em] font-bold drop-shadow-[0_0_15px_rgba(255,0,0,0.5)] text-center leading-tight">
                                         ASSASSINATION
                                     </h2>
+
+                                    {/* サブタイトル：The Last Strike */}
                                     <div className="flex justify-center items-center gap-4">
-                                        <span className="h-[1px] w-12 bg-gradient-to-r from-transparent to-red-600"></span>
-                                        <p className="text-[10px] text-red-500 font-cinzel tracking-[0.5em] uppercase font-bold">The Last Strike</p>
-                                        <span className="h-[1px] w-12 bg-gradient-to-l from-transparent to-red-600"></span>
+                                        <span className="h-[1px] w-8 sm:w-12 bg-gradient-to-r from-transparent to-red-600"></span>
+                                        <p className="text-[10px] text-red-500 font-cinzel tracking-[0.3em] sm:tracking-[0.5em] uppercase font-bold whitespace-nowrap">
+                                            The Last Strike
+                                        </p>
+                                        <span className="h-[1px] w-8 sm:w-12 bg-gradient-to-l from-transparent to-red-600"></span>
                                     </div>
                                 </div>
-
                                 {/* メインコピー：絶望と期待を煽る */}
                                 <div className="space-y-4">
                                     <p className="text-2xl text-red-100 font-bold tracking-[0.2em] animate-revealIdentity">
@@ -2185,6 +2209,50 @@
 
                             {/* 画面全体が脈打つような赤いフラッシュ */}
                             <div className="absolute inset-0 pointer-events-none animate-pulse bg-red-900/5"></div>
+                        </div>
+                    )}
+                    {/* 暗殺最終確認モーダル */}
+                    {assassinationTarget && (
+                        <div className="fixed inset-0 z-[1300] bg-black/90 flex items-center justify-center p-6 animate-fadeIn backdrop-blur-md">
+                            <div className="relative bg-[#1a0505] border-2 border-red-600/50 p-6 w-full max-w-xs shadow-[0_0_50px_rgba(220,38,38,0.2)] space-y-6 text-center">
+
+                                {/* 装飾：血のような赤い光 */}
+                                <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-red-600 to-transparent opacity-50"></div>
+
+                                <div className="space-y-2">
+                                    <h4 className="font-cinzel text-red-500 text-lg tracking-[0.2em] font-bold">EXECUTION</h4>
+                                    <p className="text-[9px] text-red-600/60 uppercase tracking-[0.3em] font-bold font-cinzel">暗殺の最終決断</p>
+                                </div>
+
+                                <div className="py-4 border-y border-red-900/30">
+                                    <p className="text-xs text-gray-400 mb-2">ターゲット</p>
+                                    <p className="text-2xl font-bold text-white tracking-widest underline decoration-red-600 underline-offset-8">
+                                        {assassinationTarget}
+                                    </p>
+                                </div>
+
+                                <p className="text-[10px] text-red-200/60 leading-relaxed italic">
+                                    「その者が真にマーリンならば、正義は潰え、我らの勝利となる。引き金。を引くか？」
+                                </p>
+
+                                <div className="flex gap-3 pt-2">
+                                    <button
+                                        onClick={() => setAssassinationTarget(null)}
+                                        className="flex-1 py-3 border border-white/10 text-gray-500 text-[10px] font-bold uppercase tracking-widest hover:bg-white/5 transition-all"
+                                    >
+                                        待機
+                                    </button>
+                                    <button
+                                        onClick={() => {
+                                            executeAssassination(assassinationTarget);
+                                            setAssassinationTarget(null);
+                                        }}
+                                        className="flex-1 py-3 bg-red-700 border border-red-500 text-white text-[10px] font-black uppercase tracking-[0.2em] shadow-[0_0_20px_rgba(220,38,38,0.4)] active:scale-95 transition-all"
+                                    >
+                                        暗殺実行
+                                    </button>
+                                </div>
+                            </div>
                         </div>
                     )}
 
@@ -2244,66 +2312,6 @@
                             {/* 画面全体を覆う周辺減光と、時折走る赤いノイズ */}
                             <div className="absolute inset-0 pointer-events-none shadow-[inset_0_0_200px_rgba(0,0,0,1)]"></div>
                             <div className="absolute top-0 left-0 w-full h-full pointer-events-none opacity-10 bg-[url('https://www.transparenttextures.com/patterns/stardust.png')] animate-pulse"></div>
-                        </div>
-                    )}
-
-                    {/* 最終結果（勝敗決定）の豪華演出 */}
-                    {gameState?.phase === 'end' && (
-                        <div className="fixed inset-0 z-[300] bg-black/95 flex flex-col items-center justify-center p-6 animate-fadeIn backdrop-blur-md">
-                            <div className={`text-center space-y-6 max-w-sm w-full p-8 border-2 rounded-lg shadow-2xl ${gameState.winner === 'GOOD' ? 'border-blue-500/50 bg-blue-900/10' : 'border-red-600/50 bg-red-900/10'}`}>
-
-                                <div className="space-y-2">
-                                    <p className={`text-5xl font-cinzel tracking-[0.2em] font-bold ${gameState.winner === 'GOOD' ? 'text-blue-400 drop-shadow-[0_0_15px_rgba(59,130,246,0.5)]' : 'text-red-500 drop-shadow-[0_0_15px_rgba(220,38,38,0.5)]'}`}>
-                                        {gameState.winner === 'GOOD' ? 'VICTORY' : 'DEFEAT'}
-                                    </p>
-                                    <p className="text-lg font-bold text-white tracking-widest">
-                                        {gameState.winner === 'GOOD' ? '正義の軍勢の勝利' : '邪悪な魔力の勝利'}
-                                    </p>
-                                </div>
-
-                                {/* 決着の理由を判定して表示 */}
-                                <div className="py-2 px-4 bg-white/5 rounded-full inline-block border border-white/10">
-                                    <p className="text-[10px] text-gray-400 uppercase tracking-[0.2em]">
-                                        {gameState.winner === 'EVIL' ? (
-                                            // 邪悪勝利の場合
-                                            gameState.assassinationResult === 'success'
-                                                ? "🔪 暗殺成功：マーリンは討ち取られた"
-                                                : gameState.voteCount >= 5
-                                                    ? "⚖️ 5回連続の提案却下"
-                                                    : "📜 遠征失敗による敗北"
-                                        ) : (
-                                            // 正義勝利の場合
-                                            gameState.assassinationResult === 'fail'
-                                                ? "🛡️ 暗殺失敗：正義は守られた"
-                                                : "⚔️ 聖戦完遂による勝利"
-                                        )}
-                                    </p>
-                                </div>
-                                {/* 真実の記録（プレイヤーリスト） */}
-                                <div className="bg-black/60 p-4 rounded-lg border border-white/10 space-y-2">
-                                    <p className="text-[10px] text-gold/60 uppercase tracking-widest mb-3 border-b border-white/10 pb-1">Archive of Truth</p>
-                                    <div className="space-y-2 max-h-[30vh] overflow-y-auto custom-scrollbar pr-2 text-left">
-                                        {Object.entries(gameState.playerMap).map(([name, role]) => (
-                                            <div key={name} className="flex justify-between items-center border-b border-white/5 py-1.5 text-sm">
-                                                <span className="text-gray-200">{name}</span>
-                                                <span className={`font-cinzel text-xs font-bold ${['暗殺者', 'モルガナ', 'モードレッド', 'オベロン'].includes(role) ? 'text-red-400' : 'text-blue-400'}`}>
-                                                    {role}
-                                                </span>
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-
-                                {/* 豪華なリザルト画面の中 */}
-                                <div className="flex flex-col gap-3 w-full mt-6">
-                                    <button
-                                        onClick={handleReset}
-                                        className="w-full py-3 mt-4 bg-white/5 border border-white/20 text-gray-300 font-cinzel text-xs tracking-[0.2em] hover:bg-white/10 hover:text-white hover:border-white/40 transition-all rounded"
-                                    >
-                                        タイトルへ戻る
-                                    </button>
-                                </div>
-                            </div>
                         </div>
                     )}
                 </div>
