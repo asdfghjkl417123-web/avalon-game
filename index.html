@@ -211,6 +211,14 @@
 
         function App() {
             // --- 1. ユーザー情報・基本設定 ---
+            const [myUid] = useState(() => {
+                let uid = localStorage.getItem('camelot_uid');
+                if (!uid) {
+                    uid = 'kn-' + Math.random().toString(36).substring(2, 15);
+                    localStorage.setItem('camelot_uid', uid);
+                }
+                return uid;
+            });
             const [roomCode, setRoomCode] = useState(localStorage.getItem('avalon_room') || "");
             const [myName, setMyName] = useState(localStorage.getItem('avalon_name') || "");
             const [isJoined, setIsJoined] = useState(false);
@@ -245,12 +253,28 @@
 
             const pCount = gameState?.playerList?.length || Object.keys(gameState?.players || {}).length || 5;
 
-            const prevStartedRef = React.useRef(false);
-
             // --- 3. 共通DB処理 ---
             const dbUpdate = (updates) => {
+                if (!roomCode) return;
                 const roomRef = window.fb.ref(window.fb.db, `rooms/${roomCode}`);
-                window.fb.update(roomRef, updates);
+
+                // すべての更新に「最終活動時刻」を刻印（伝説の風化を防ぐ礎）
+                const updatesWithTimestamp = {
+                    ...updates,
+                    lastActivity: Date.now()
+                };
+                window.fb.update(roomRef, updatesWithTimestamp);
+            };
+
+            // タイマー増減ロジックの追加
+            const adjustTimer = (offsetSeconds) => {
+                if (!isHost || !gameState?.discussionEndTime) return;
+                const newEndTime = gameState.discussionEndTime + (offsetSeconds * 1000);
+                if (newEndTime < Date.now()) {
+                    stopDiscussionTimer();
+                } else {
+                    dbUpdate({ discussionEndTime: newEndTime });
+                }
             };
 
             const addLog = (msg) => {
@@ -273,7 +297,11 @@
                         setGameState(data);
                         // プレイヤーリストの先頭、または明示的なホスト指定があれば自分と比較
                         const playerNames = Object.keys(data.players || {});
-                        if (playerNames[0] === myName) setIsHost(true);
+                        if (data.host === myName && data.hostUid === myUid) {
+                            setIsHost(true);
+                        } else {
+                            setIsHost(false);
+                        }
                     }
                 });
                 return () => unsubscribe();
@@ -398,19 +426,24 @@
                 return () => unsubscribe();
             }, [roomCode, isJoined, myName, gameState]); // gameStateを依存関係に追加
 
-            // ゲーム開始を検知して、全員一斉に役職演出（Identity Assigned）を開始する
+            // ゲーム開始を検知して、全員一斉に役職演出を開始する
             useEffect(() => {
-                // データがまだ届いていない場合は何もしない
                 if (!gameState) return;
 
-                // 前回の状態が false で、現在の状態が true の時（＝「聖戦開始」が押された瞬間）だけ実行
-                if (gameState.started && !prevStartedRef.current) {
+                // 「ゲーム開始状態」かつ「このセッションでまだ演出を見ていない」場合のみ
+                const alreadyRevealed = sessionStorage.getItem(`revealed_${roomCode}`);
+
+                if (gameState.started && !alreadyRevealed) {
                     setIsRevealingRole(true);
+                    // ★重要：表示が始まった瞬間にフラグを立ててしまう
+                    sessionStorage.setItem(`revealed_${roomCode}`, 'true');
                 }
 
-                // 現在の状態を保存しておく（リロードしても、Firebaseからデータが来た瞬間にこれが更新される）
-                prevStartedRef.current = !!gameState.started;
-            }, [gameState?.started]);
+                // ゲームがリセットされたら、フラグも削除して次のゲームに備える
+                if (!gameState.started) {
+                    sessionStorage.removeItem(`revealed_${roomCode}`);
+                }
+            }, [gameState?.started, roomCode]);
 
             // 演出同期: 投票結果
             useEffect(() => {
@@ -444,22 +477,54 @@
             }, [gameState?.phase, gameState?.isAssassinationPerforming]);
 
             // --- 5. アクション関数 ---
+            // 既存の joinGame 関数を以下のように書き換えてください
             const joinGame = () => {
                 if (!roomCode || !myName) return alert("部屋コードと名前を入力してください");
-                localStorage.setItem('avalon_room', roomCode);
-                localStorage.setItem('avalon_name', myName);
-                setIsJoined(true);
 
                 const roomRef = window.fb.ref(window.fb.db, `rooms/${roomCode}`);
+
                 window.fb.onValue(roomRef, (snapshot) => {
                     const data = snapshot.val();
-                    // 部屋がまだ存在しない、またはホストがいない場合は自分がホストになる
-                    if (!data || !data.host) {
-                        window.fb.update(roomRef, { host: myName });
+                    if (data && data.lastActivity) {
+                        const diffMinutes = (Date.now() - data.lastActivity) / (1000 * 60);
+                        if (diffMinutes > 30) {
+                            // 30分経過：伝説の風化による聖域の浄化
+                            window.fb.remove(roomRef);
+                            console.log("【聖域の浄化】長らく人の気配がないため、ルームをリセットしました。");
+                            setTimeout(() => proceedJoin(), 500);
+                            return;
+                        }
                     }
-                    window.fb.set(window.fb.ref(window.fb.db, `rooms/${roomCode}/players/${myName}`), { joined: true });
-                }, { onlyOnce: true }); // 最初の一回だけ確認
+                    proceedJoin();
+                }, { onlyOnce: true });
+
+                const proceedJoin = () => {
+                    localStorage.setItem('avalon_room', roomCode);
+                    localStorage.setItem('avalon_name', myName);
+                    setIsJoined(true);
+
+                    const roomRef = window.fb.ref(window.fb.db, `rooms/${roomCode}`);
+                    window.fb.onValue(roomRef, (snapshot) => {
+                        const data = snapshot.val();
+
+                        // 1. ホスト登録（UIDもセット）
+                        if (!data || !data.host) {
+                            window.fb.update(roomRef, {
+                                host: myName,
+                                hostUid: myUid, // ★重要
+                                lastActivity: Date.now()
+                            });
+                        }
+
+                        // 2. プレイヤー登録（UIDを紐付け）
+                        window.fb.set(window.fb.ref(window.fb.db, `rooms/${roomCode}/players/${myName}`), {
+                            joined: true,
+                            uid: myUid // ★重要：これが「真の名」
+                        });
+                    }, { onlyOnce: true });
+                };
             };
+
             const confirmSettings = () => {
                 // 人数チェック
                 if (selectedRoles.length !== pCount) {
@@ -520,6 +585,13 @@
             };
 
             const castVote = (choice) => {
+                const registeredUid = gameState.players[myName]?.uid;
+
+                // 一致しない場合は、なりすましとみなして処理をブロック
+                if (registeredUid !== myUid) {
+                    alert("汝は偽物なり。真の騎士のみが行動を許される。");
+                    return;
+                }
                 if (hasActioned) return;
                 setHasActioned(true);
                 const newVotes = { ...(gameState.votes || {}), [myName]: choice };
@@ -566,6 +638,12 @@
             };
 
             const questAction = (choice) => {
+                const registeredUid = gameState.players[myName]?.uid;
+                if (registeredUid !== myUid) {
+                    alert("汝は偽物なり。真の騎士のみが運命を選択できる。");
+                    return;
+                }
+
                 if (hasActioned) return;
                 setHasActioned(true);
                 dbUpdate({ lastVoteId: null, lastVoteStatus: null });
@@ -648,6 +726,13 @@
             };
 
             const executeAssassination = (targetName) => {
+                // 【UID認証】自分が本当に暗殺者として登録されているか、UIDで最終確認
+                const registeredUid = gameState.players[myName]?.uid;
+                if (registeredUid !== myUid) {
+                    alert("汝に暗殺の権限はない。");
+                    return;
+                }
+
                 const isMerlin = gameState.playerMap[targetName] === 'マーリン';
                 dbUpdate({ assassinationTarget: targetName, isAssassinationPerforming: true, assassinationId: Date.now() });
                 setTimeout(() => {
@@ -660,6 +745,35 @@
                     });
                 }, 5000);
             };
+
+            // 前回の started 状態を記憶するための参照（初期値は true にしておくことでリロード時の発火を防ぐ）
+            const prevStartedRef = React.useRef(false);
+
+            // ゲーム開始を検知して、全員一斉に役職演出を開始する
+            useEffect(() => {
+                // 1. まだデータがない、あるいはゲームが始まっていない場合は何もしない
+                if (!gameState) return;
+
+                if (!gameState.started) {
+                    // ゲームがリセット状態なら、フラグをすべてクリアして次戦に備える
+                    prevStartedRef.current = false;
+                    sessionStorage.removeItem(`revealed_${roomCode}`);
+                    return;
+                }
+
+                // 2. 「未視聴」かつ「開始フラグが今 true になった」場合のみ演出を実行
+                const alreadyRevealed = sessionStorage.getItem(`revealed_${roomCode}`);
+
+                // started が false -> true になった瞬間を検知
+                if (gameState.started && prevStartedRef.current === false && !alreadyRevealed) {
+                    setIsRevealingRole(true);
+                    // sessionStorageに即座に記録（リロード対策）
+                    sessionStorage.setItem(`revealed_${roomCode}`, 'true');
+                }
+
+                // 3. 現在の状態を ref に保存（次回の比較用）
+                prevStartedRef.current = !!gameState.started;
+            }, [gameState?.started, roomCode]);
 
             const handleReset = () => {
                 if (confirm("ゲームを完全にリセットしますか？")) {
@@ -1250,6 +1364,7 @@
                                         <div className="flex gap-2">
                                             {!gameState?.discussionEndTime ? (
                                                 <>
+                                                    <button onClick={() => startDiscussionTimer(60)} className="px-2 py-1 text-[8px] border border-gold/30 text-gold rounded hover:bg-gold/10 transition-all">1min</button>
                                                     <button onClick={() => startDiscussionTimer(180)} className="px-2 py-1 text-[8px] border border-gold/30 text-gold rounded hover:bg-gold/10 transition-all">3min</button>
                                                     <button onClick={() => startDiscussionTimer(300)} className="px-2 py-1 text-[8px] border border-gold/30 text-gold rounded hover:bg-gold/10 transition-all">5min</button>
                                                 </>
@@ -2041,7 +2156,7 @@
 
                                 <div className="pt-4">
                                     <button
-                                        onClick={() => setIsRevealingRole(false)}
+                                        onClick={() => { setIsRevealingRole(false); sessionStorage.setItem(`revealed_${roomCode}`, 'true'); }}
                                         className="w-full group relative py-4 bg-transparent transition-all overflow-hidden border border-white/10 rounded-sm"
                                     >
                                         <div className="absolute inset-0 bg-white/5 group-hover:bg-white/10 transition-colors"></div>
