@@ -15,7 +15,7 @@
 
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-        import { getDatabase, ref, set, onValue, update, remove } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+        import { getDatabase, ref, set, onValue, update, remove, get, runTransaction } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
 
         const firebaseConfig = {
             apiKey: "AIzaSyC1Y1Cx3eiweokQyKCZ5c_PfBx5txi9Omk",
@@ -30,7 +30,7 @@
 
         const app = initializeApp(firebaseConfig);
         const db = getDatabase(app);
-        window.fb = { db, ref, set, onValue, update, remove };
+        window.fb = { db, ref, set, onValue, update, remove, get, runTransaction };
     </script>
 
     <style>
@@ -277,6 +277,26 @@
                 }
             };
 
+            // 遠征メンバー数調整用ロジック
+            const adjustMemberCount = (questIdx, delta) => {
+                if (!isHost) return;
+                // 現在の設定を取得
+                const currentConf = gameState?.gameConfig || gameConfig;
+                const newConfig = JSON.parse(JSON.stringify(currentConf));
+                const currentVal = newConfig[pCount].members[questIdx];
+                const nextVal = currentVal + delta;
+
+                // バリデーション: 1人以上、現在の参加騎士数(pCount)以下に制限
+                if (nextVal >= 1 && nextVal <= pCount) {
+                    newConfig[pCount].members[questIdx] = nextVal;
+                    setGameConfig(newConfig);
+                    // 設定更新を即座にFirebaseへ同期
+                    window.fb.update(window.fb.ref(window.fb.db, `rooms/${roomCode}`), {
+                        gameConfig: newConfig
+                    });
+                }
+            };
+
             const addLog = (msg) => {
                 // 既存のログを取得（なければ空配列）
                 const currentLogs = gameState?.logs || [];
@@ -291,21 +311,72 @@
             useEffect(() => {
                 if (!roomCode || !isJoined) return;
                 const roomRef = window.fb.ref(window.fb.db, `rooms/${roomCode}`);
+
                 const unsubscribe = window.fb.onValue(roomRef, (snapshot) => {
                     const data = snapshot.val();
-                    if (data) {
-                        setGameState(data);
-                        // プレイヤーリストの先頭、または明示的なホスト指定があれば自分と比較
+
+                    // A. 部屋自体がない場合
+                    if (!data) {
+                        setIsJoined(false);
+                        return;
+                    }
+
+                    // B. 【最優先】UID（真の名）の厳格チェック
+                    if (data.players && data.players[myName]) {
+                        const registeredUid = data.players[myName].uid;
+                        if (registeredUid && registeredUid !== myUid) {
+                            alert("真の名（UID）の不一致。聖域から追放されました。");
+                            setIsJoined(false);
+                            return;
+                        }
+                    }
+
+                    // C. 除外判定（ゲーム開始前かつリストにいない場合）
+                    if (!data.started && data.players) {
+                        if (!Object.keys(data.players).includes(myName)) {
+                            // gameStateが存在する＝既に入室していた状態からの消失のみキック
+                            if (gameState) {
+                                alert("遠征軍から除外されました。");
+                                setIsJoined(false);
+                                return;
+                            }
+                        }
+                    }
+
+                    // D. データのセット（情報の開示）
+                    setGameState(data);
+
+                    // E. ホスト権限の同期
+                    if (data.host === myName && data.hostUid === myUid) {
+                        setIsHost(true);
+                    } else {
+                        // ホストが不在の場合の自動修復
                         const playerNames = Object.keys(data.players || {});
-                        if (data.host === myName && data.hostUid === myUid) {
+                        if (!data.host && playerNames[0] === myName) {
+                            window.fb.update(roomRef, { host: myName, hostUid: myUid });
                             setIsHost(true);
                         } else {
                             setIsHost(false);
                         }
                     }
+
+                    // F. 【重要】役職演出の発火ロジック
+                    if (data.started) {
+                        const alreadyRevealed = sessionStorage.getItem(`revealed_${roomCode}`);
+                        // まだ演出を見ていない場合のみ表示
+                        if (!alreadyRevealed) {
+                            setIsRevealingRole(true);
+                            // 表示したことを記録（リロードしても二度と出ない）
+                            sessionStorage.setItem(`revealed_${roomCode}`, 'true');
+                        }
+                    } else {
+                        // ゲームが開始前（またはリセット後）なら演出フラグを消しておく
+                        sessionStorage.removeItem(`revealed_${roomCode}`);
+                    }
                 });
+
                 return () => unsubscribe();
-            }, [roomCode, isJoined]);
+            }, [roomCode, isJoined, myName, myUid]);
 
             // フェーズ変更時の入力リセット
             useEffect(() => {
@@ -317,36 +388,15 @@
 
             // 人数が変わった時に、デフォルトの役職セットを自動選択する
             useEffect(() => {
-                if (gameState?.started) return; // ゲーム開始後は変更しない
-
+                if (gameState?.started) return;
                 let roles = ['マーリン', 'パーシヴァル', '忠臣', '暗殺者', 'モルガナ'];
                 if (pCount >= 6) roles.push('忠臣');
                 if (pCount >= 7) roles.push('モードレッド');
                 if (pCount >= 8) roles.push('忠臣');
                 if (pCount >= 9) roles.push('忠臣');
                 if (pCount >= 10) roles.push('オベロン');
-
                 setSelectedRoles(roles);
             }, [pCount, gameState?.started]);
-
-            // ホストを判定ロジック
-            useEffect(() => {
-                if (!roomCode || !isJoined) return;
-                const roomRef = window.fb.ref(window.fb.db, `rooms/${roomCode}`);
-                const unsubscribe = window.fb.onValue(roomRef, (snapshot) => {
-                    const data = snapshot.val();
-                    if (data) {
-                        setGameState(data);
-                        // DBに記録されているホスト名と自分の名前が一致するかで判定
-                        if (data.host === myName) {
-                            setIsHost(true);
-                        } else {
-                            setIsHost(false); // 他の人がホストなら自分は解除する
-                        }
-                    }
-                });
-                return () => unsubscribe();
-            }, [roomCode, isJoined, myName]);
 
             // 【重要】ホストの編集内容をリアルタイムでFirebaseへ送信する
             useEffect(() => {
@@ -372,59 +422,20 @@
                 dbUpdate({ discussionEndTime: null });
             };
 
-            // タイマーの同期とカウントダウン
+            // タイマーのカウントダウン
             useEffect(() => {
                 const timer = setInterval(() => {
                     if (gameState?.discussionEndTime) {
                         const remaining = Math.max(0, Math.floor((gameState.discussionEndTime - Date.now()) / 1000));
                         setTimeLeft(remaining);
-
-                        // 終了時の処理（任意でSEを鳴らすなど）
-                        if (remaining === 0) {
-                            // 終了後の処理
-                        }
                     } else {
                         setTimeLeft(null);
                     }
-                }, 500); // 0.5秒ごとに計算（よりスムーズに）
-
+                }, 500);
                 return () => clearInterval(timer);
             }, [gameState?.discussionEndTime]);
 
-            // App内のuseEffect（Firebase監視部分）を以下に差し替え
-            useEffect(() => {
-                if (!roomCode || !isJoined) return;
-                const roomRef = window.fb.ref(window.fb.db, `rooms/${roomCode}`);
-                const unsubscribe = window.fb.onValue(roomRef, (snapshot) => {
-                    const data = snapshot.val();
-                    if (data) {
-                        // 1. まずデータをセット
-                        setGameState(data);
 
-                        // 2. 除外判定：ゲーム開始前で、かつ既に自分が入室済みだったのにリストから消えた場合のみ発動
-                        // data.playersがnull（部屋リセット時）の場合は除外扱いしない
-                        if (!data.started && data.players) {
-                            const isMeInList = Object.keys(data.players).includes(myName);
-                            // 以前はリストにいた（gameStateがある）のに、今はいない場合
-                            if (gameState && !isMeInList) {
-                                alert("遠征軍から除外されました。");
-                                setIsJoined(false);
-                                return;
-                            }
-                        }
-
-                        // 3. ホスト判定
-                        const playerNames = Object.keys(data.players || {});
-                        if (data.host === myName || (!data.host && playerNames[0] === myName)) {
-                            if (!data.host) window.fb.update(roomRef, { host: myName });
-                            setIsHost(true);
-                        } else {
-                            setIsHost(false);
-                        }
-                    }
-                });
-                return () => unsubscribe();
-            }, [roomCode, isJoined, myName, gameState]); // gameStateを依存関係に追加
 
             // ゲーム開始を検知して、全員一斉に役職演出を開始する
             useEffect(() => {
@@ -445,7 +456,7 @@
                 }
             }, [gameState?.started, roomCode]);
 
-            // 演出同期: 投票結果
+            // 演出同期: 投票結果のカットイン
             useEffect(() => {
                 if (gameState?.lastVoteId && gameState?.lastVoteStatus) {
                     setLastVoteStatus(gameState.lastVoteStatus);
@@ -477,52 +488,50 @@
             }, [gameState?.phase, gameState?.isAssassinationPerforming]);
 
             // --- 5. アクション関数 ---
-            // 既存の joinGame 関数を以下のように書き換えてください
-            const joinGame = () => {
+            const joinGame = async () => {
                 if (!roomCode || !myName) return alert("部屋コードと名前を入力してください");
 
                 const roomRef = window.fb.ref(window.fb.db, `rooms/${roomCode}`);
+                const playerRef = window.fb.ref(window.fb.db, `rooms/${roomCode}/players/${myName}`);
 
-                window.fb.onValue(roomRef, (snapshot) => {
-                    const data = snapshot.val();
-                    if (data && data.lastActivity) {
-                        const diffMinutes = (Date.now() - data.lastActivity) / (1000 * 60);
-                        if (diffMinutes > 30) {
-                            // 30分経過：伝説の風化による聖域の浄化
-                            window.fb.remove(roomRef);
-                            console.log("【聖域の浄化】長らく人の気配がないため、ルームをリセットしました。");
-                            setTimeout(() => proceedJoin(), 500);
-                            return;
-                        }
+                try {
+                    // 1. 最新のプレイヤーデータを取得して検問
+                    const snapshot = await window.fb.get(playerRef);
+                    const playerData = snapshot.val();
+
+                    // 2. 他のブラウザ（別UID）が既にその名前を使っている場合
+                    if (playerData && playerData.uid && playerData.uid !== myUid) {
+                        alert("汝は偽物なり。その名は既に別の騎士によって封印されている。");
+                        return; // ここで完全に終了し、画面は切り替えない
                     }
-                    proceedJoin();
-                }, { onlyOnce: true });
 
-                const proceedJoin = () => {
+                    // 3. 部屋の状態を確認
+                    const roomSnapshot = await window.fb.get(roomRef);
+                    const roomData = roomSnapshot.val();
+
+                    // 4. 書き込みデータ作成
+                    const updates = {};
+                    updates[`players/${myName}/joined`] = true;
+                    updates[`players/${myName}/uid`] = myUid;
+
+                    if (!roomData || !roomData.host) {
+                        updates.host = myName;
+                        updates.hostUid = myUid;
+                    }
+                    updates.lastActivity = Date.now();
+
+                    // 5. 【最重要】Firebaseへの書き込みが完了したことを「待つ」
+                    await window.fb.update(roomRef, updates);
+
+                    // 6. 書き込みが成功したことが確認できてから、初めて入室を許可する
                     localStorage.setItem('avalon_room', roomCode);
                     localStorage.setItem('avalon_name', myName);
                     setIsJoined(true);
 
-                    const roomRef = window.fb.ref(window.fb.db, `rooms/${roomCode}`);
-                    window.fb.onValue(roomRef, (snapshot) => {
-                        const data = snapshot.val();
-
-                        // 1. ホスト登録（UIDもセット）
-                        if (!data || !data.host) {
-                            window.fb.update(roomRef, {
-                                host: myName,
-                                hostUid: myUid, // ★重要
-                                lastActivity: Date.now()
-                            });
-                        }
-
-                        // 2. プレイヤー登録（UIDを紐付け）
-                        window.fb.set(window.fb.ref(window.fb.db, `rooms/${roomCode}/players/${myName}`), {
-                            joined: true,
-                            uid: myUid // ★重要：これが「真の名」
-                        });
-                    }, { onlyOnce: true });
-                };
+                } catch (error) {
+                    console.error("検問エラー:", error);
+                    alert("通信エラーが発生しました。");
+                }
             };
 
             const confirmSettings = () => {
@@ -584,57 +593,93 @@
                 });
             };
 
+            // 1. トランザクションを利用した投票関数
             const castVote = (choice) => {
                 const registeredUid = gameState.players[myName]?.uid;
 
-                // 一致しない場合は、なりすましとみなして処理をブロック
                 if (registeredUid !== myUid) {
                     alert("汝は偽物なり。真の騎士のみが行動を許される。");
                     return;
                 }
                 if (hasActioned) return;
                 setHasActioned(true);
-                const newVotes = { ...(gameState.votes || {}), [myName]: choice };
 
-                if (Object.keys(newVotes).length === gameState.playerList.length) {
-                    const yesCount = Object.values(newVotes).filter(v => v === 'yes').length;
-                    const approved = yesCount > gameState.playerList.length / 2;
-                    const voteDetails = Object.entries(newVotes).map(([n, v]) => `${n}:${v === 'yes' ? '○' : '×'}`).join("  ");
+                // 投票データが保存されているパスを指定
+                const votesRef = window.fb.ref(window.fb.db, `rooms/${roomCode}/votes`);
 
-                    const newVoteRecord = {
-                        quest: gameState.currentQuest,
-                        count: (gameState.voteCount || 0) + 1,
-                        leader: gameState.currentLeader,
-                        team: [...gameState.proposedTeam],
-                        details: voteDetails,
-                        approved
-                    };
+                // 順番待ちをさせて確実に1票ずつ追加する
+                window.fb.runTransaction(votesRef, (currentVotes) => {
+                    // 現在の投票データに自分の票を加えた新しいオブジェクトを返す
+                    return { ...(currentVotes || {}), [myName]: choice };
+                }).then(() => {
+                    // 書き込み成功後、全員揃ったかチェックする
+                    checkVoteEnd();
+                }).catch((error) => {
+                    console.error("投票トランザクションエラー:", error);
+                    setHasActioned(false); // 失敗した場合は再試行を許可
+                });
+            };
 
-                    const baseUpdate = {
-                        votes: {},
-                        lastVoteStatus: approved ? 'approved' : 'rejected',
-                        lastVoteId: Date.now(),
-                        lastVoteResult: voteDetails,
-                        voteHistory: [...(gameState.voteHistory || []), newVoteRecord]
-                    };
+            // 2. 全員が投票し終えたか確認し、フェーズを進める補助関数
+            const checkVoteEnd = () => {
+                const roomRef = window.fb.ref(window.fb.db, `rooms/${roomCode}`);
 
-                    if (approved) {
-                        dbUpdate({ ...baseUpdate, phase: 'quest', questData: {}, logs: addLog(`提案承認 (${yesCount}票)。`) });
-                    } else {
-                        const nextIdx = (gameState.playerList.indexOf(gameState.currentLeader) + 1) % gameState.playerList.length;
-                        const newCount = (gameState.voteCount || 0) + 1;
-                        dbUpdate({
-                            ...baseUpdate,
-                            phase: newCount >= 5 ? 'end' : 'propose',
-                            winner: newCount >= 5 ? 'EVIL' : null,
-                            currentLeader: gameState.playerList[nextIdx],
-                            voteCount: newCount >= 5 ? 0 : newCount,
-                            logs: addLog(newCount >= 5 ? "5回却下により邪悪の勝利" : `提案却下。`)
-                        });
+                // 最新のルームデータを取得して判定
+                window.fb.get(roomRef).then((snapshot) => {
+                    const data = snapshot.val();
+                    if (!data) return;
+
+                    const currentVotes = data.votes || {};
+                    const playerList = data.playerList || [];
+
+                    // 全員の票が揃った場合のみ集計処理を行う
+                    if (Object.keys(currentVotes).length === playerList.length) {
+                        const yesCount = Object.values(currentVotes).filter(v => v === 'yes').length;
+                        const approved = yesCount > playerList.length / 2;
+                        const voteDetails = Object.entries(currentVotes)
+                            .map(([n, v]) => `${n}:${v === 'yes' ? '○' : '×'}`)
+                            .join("  ");
+
+                        const newVoteRecord = {
+                            quest: data.currentQuest,
+                            count: (data.voteCount || 0) + 1,
+                            leader: data.currentLeader,
+                            team: [...data.proposedTeam],
+                            details: voteDetails,
+                            approved
+                        };
+
+                        const baseUpdate = {
+                            votes: {}, // 次の投票のために空にする
+                            lastVoteStatus: approved ? 'approved' : 'rejected',
+                            lastVoteId: Date.now(),
+                            lastVoteResult: voteDetails,
+                            voteHistory: [...(data.voteHistory || []), newVoteRecord]
+                        };
+
+                        if (approved) {
+                            // 承認時：クエストフェーズへ
+                            dbUpdate({
+                                ...baseUpdate,
+                                phase: 'quest',
+                                questData: {},
+                                logs: addLog(`提案承認 (${yesCount}票)。`)
+                            });
+                        } else {
+                            // 却下時：リーダー交代または5回却下で終了
+                            const nextIdx = (playerList.indexOf(data.currentLeader) + 1) % playerList.length;
+                            const newCount = (data.voteCount || 0) + 1;
+                            dbUpdate({
+                                ...baseUpdate,
+                                phase: newCount >= 5 ? 'end' : 'propose',
+                                winner: newCount >= 5 ? 'EVIL' : null,
+                                currentLeader: playerList[nextIdx],
+                                voteCount: newCount >= 5 ? 0 : newCount,
+                                logs: addLog(newCount >= 5 ? "5回却下により邪悪の勝利" : `提案却下。`)
+                            });
+                        }
                     }
-                } else {
-                    dbUpdate({ votes: newVotes });
-                }
+                });
             };
 
             const questAction = (choice) => {
@@ -877,6 +922,14 @@
                                                 <span className={`text-sm tracking-widest font-bold ${name === myName ? 'text-gold' : 'text-gray-300'}`}>
                                                     {name}
                                                 </span>
+                                                {/* --- ホスト識別用の王冠マーク (SVG) --- */}
+                                                {name === gameState?.host && (
+                                                    <span className="ml-1 flex items-center justify-center" title="ホスト（聖域の守護者）">
+                                                        <svg className="w-3.5 h-3.5 text-gold drop-shadow-[0_0_3px_rgba(197,160,89,0.6)]" viewBox="0 0 24 24" fill="currentColor">
+                                                            <path d="M5,16L3,5L8.5,10L12,4L15.5,10L21,5L19,16H5M19,19C19,19.6 18.6,20 18,20H6C5.4,20 5,19.6 5,19V18H19V19Z" />
+                                                        </svg>
+                                                    </span>
+                                                )}
                                             </div>
 
                                             <div className="flex items-center gap-3">
@@ -934,27 +987,46 @@
                                                 </div>
 
                                                 <div className="grid grid-cols-5 gap-2">
-                                                    {(gameConfig[pCount] || DEFAULT_CONFIG[5]).members.map((num, idx) => (
-                                                        <div key={idx} className="flex flex-col items-center gap-1.5 group">
-                                                            <span className="text-[8px] text-gray-600 font-bold italic">Quest {idx + 1}</span>
-                                                            {/* 人数は固定表示 (変更不可) */}
-                                                            <div className="w-full bg-white/5 border border-white/10 text-[11px] font-black text-center text-gray-400 py-2 rounded-sm shadow-inner">
-                                                                {num}<span className="text-[7px] font-normal ml-0.5 opacity-50 text-gray-500">人</span>
+                                                    {(gameState?.gameConfig?.[pCount] || gameConfig[pCount] || DEFAULT_CONFIG[5]).members.map((num, idx) => (
+                                                        <div key={idx} className="flex flex-col items-center gap-1 group">
+                                                            <span className="text-[7px] text-gray-600 font-bold italic mb-1">Q{idx + 1}</span>
+
+                                                            {/* 増加ボタン：黄金の尖塔 */}
+                                                            <button
+                                                                onClick={() => adjustMemberCount(idx, 1)}
+                                                                className="text-[10px] gold-text hover:scale-125 hover:drop-shadow-[0_0_8px_#c5a059] transition-all duration-300 leading-none pb-1"
+                                                            >
+                                                                ▲
+                                                            </button>
+
+                                                            {/* 人数表示枠 */}
+                                                            <div className="w-full bg-white/5 border border-white/10 text-[12px] font-black text-center text-gold py-1 rounded-sm shadow-inner">
+                                                                {num}
                                                             </div>
-                                                            {/* 失敗枚数のみトグル可能 */}
+
+                                                            {/* 減少ボタン：逆転の尖塔 */}
+                                                            <button
+                                                                onClick={() => adjustMemberCount(idx, -1)}
+                                                                className="text-[10px] gold-text hover:scale-125 hover:drop-shadow-[0_0_8px_#c5a059] transition-all duration-300 leading-none pt-1"
+                                                            >
+                                                                ▼
+                                                            </button>
+
+                                                            {/* 失敗枚数トグル（既存） */}
                                                             <button
                                                                 onClick={() => {
-                                                                    const newConfig = JSON.parse(JSON.stringify(gameConfig));
+                                                                    const currentConf = gameState?.gameConfig || gameConfig;
+                                                                    const newConfig = JSON.parse(JSON.stringify(currentConf));
                                                                     const currentFails = newConfig[pCount].failsRequired[idx];
                                                                     newConfig[pCount].failsRequired[idx] = currentFails === 1 ? 2 : 1;
                                                                     setGameConfig(newConfig);
                                                                 }}
-                                                                className={`text-[8px] w-full py-1 rounded-sm border font-black transition-all active:scale-95 shadow-sm ${(gameConfig[pCount] || DEFAULT_CONFIG[5]).failsRequired[idx] >= 2
-                                                                    ? 'bg-red-900/40 border-red-500 text-red-100 shadow-red-900/20'
+                                                                className={`text-[7px] w-full py-1 mt-1 rounded-sm border font-black transition-all ${(gameState?.gameConfig?.[pCount] || gameConfig[pCount])?.failsRequired[idx] >= 2
+                                                                    ? 'bg-red-900/40 border-red-500 text-red-100'
                                                                     : 'bg-blue-900/10 border-blue-900/40 text-blue-400 opacity-60'
                                                                     }`}
                                                             >
-                                                                {(gameConfig[pCount] || DEFAULT_CONFIG[5]).failsRequired[idx]} FAIL
+                                                                {(gameState?.gameConfig?.[pCount] || gameConfig[pCount])?.failsRequired[idx]} FAIL
                                                             </button>
                                                         </div>
                                                     ))}
@@ -1385,34 +1457,34 @@
                                         return (
                                             <div
                                                 key={p}
-                                                className={`relative flex items-center gap-2 px-3 py-1.5 rounded-sm border transition-all duration-500 ${isMe ? 'ring-1 ring-gold/30 border-gold/50 bg-gold/5' : 'border-white/10 bg-white/[0.02]'
-                                                    } ${hasVoted
+                                                className={`relative flex items-center gap-2 px-3 py-1.5 rounded-sm border transition-all duration-500 
+                                                    ${isLeader
+                                                        ? 'border-white border-2 shadow-[0_0_15px_rgba(255,255,255,0.2)] z-10 scale-105'
+                                                        : 'border-white/10 bg-white/[0.02]'
+                                                    } 
+                                                    ${hasVoted
                                                         ? 'border-green-500/50 bg-green-500/10 opacity-100 shadow-[0_0_10px_rgba(34,197,94,0.1)]'
                                                         : gameState.phase === 'voting' ? 'opacity-40 grayscale' : 'opacity-80'
                                                     }`}
                                             >
-                                                {/* リーダーアイコン（絵文字の代わりに黄金のインジケーター） */}
+                                                {/* リーダーアイコン：白いインジケーター */}
                                                 {isLeader && (
                                                     <div className="flex flex-col items-center justify-center">
-                                                        <div className="w-1.5 h-1.5 bg-gold rotate-45 animate-pulse shadow-[0_0_5px_rgba(197,160,89,1)]"></div>
+                                                        <div className="w-1.5 h-1.5 bg-white rotate-45 animate-pulse shadow-[0_0_8px_rgba(255,255,255,1)]"></div>
                                                     </div>
                                                 )}
 
-                                                {/* 名前 */}
-                                                <span className={`text-[11px] font-bold tracking-wider ${isMe ? 'text-gold' : 'text-gray-300'}`}>
+                                                {/* 名前：自分なら金色、それ以外はグレー */}
+                                                <span className={`text-[11px] font-bold tracking-wider ${isMe ? 'text-gold brightness-125' : 'text-gray-300'}`}>
                                                     {p}
                                                 </span>
 
-                                                {/* 投票済みサイン（絵文字の代わりにチェックマーク風ライン） */}
+                                                {/* 投票済みサイン */}
+                                                {/* 投票済み：プルダウンに見えないよう、チェックマーク記号に変更 */}
                                                 {hasVoted && (
-                                                    <div className="ml-1 flex items-center justify-center w-2 h-2">
-                                                        <div className="w-full h-full border-b-2 border-r-2 border-green-400 rotate-45 transform -translate-y-0.5"></div>
-                                                    </div>
-                                                )}
-
-                                                {/* 自分自身を示すアンダーライン */}
-                                                {isMe && (
-                                                    <div className="absolute -bottom-0.5 left-1/2 -translate-x-1/2 w-4 h-[1px] bg-gold"></div>
+                                                    <span className="ml-1 text-[12px] text-green-400 font-bold leading-none drop-shadow-[0_0_5px_rgba(74,222,128,0.5)]">
+                                                        ✓
+                                                    </span>
                                                 )}
                                             </div>
                                         );
