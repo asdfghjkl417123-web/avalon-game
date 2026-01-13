@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AVALON: Realtime Command</title>
+    <title>CAMELOT: Realtime Command</title>
 
     <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -220,8 +220,8 @@
                 }
                 return uid;
             });
-            const [roomCode, setRoomCode] = useState(localStorage.getItem('avalon_room') || "");
-            const [myName, setMyName] = useState(localStorage.getItem('avalon_name') || "");
+            const [roomCode, setRoomCode] = useState(localStorage.getItem('camelot_room') || "");
+            const [myName, setMyName] = useState(localStorage.getItem('camelot_name') || "");
             const [isJoined, setIsJoined] = useState(false);
             const [gameState, setGameState] = useState(null);
 
@@ -251,6 +251,8 @@
 
             const [discussionTime, setDiscussionTime] = useState(300); // 初期値：5分（300秒）
             const [timeLeft, setTimeLeft] = useState(null); // 表示用の残り時間
+
+            const [isSpectator, setIsSpectator] = useState(false);
 
             const pCount = gameState?.playerList?.length || Object.keys(gameState?.players || {}).length || 5;
 
@@ -489,44 +491,69 @@
             }, [gameState?.phase, gameState?.isAssassinationPerforming]);
 
             // --- 5. アクション関数 ---
-            const joinGame = async () => {
+            // 引数に asSpectator (デフォルトは false) を追加
+            const joinGame = async (asSpectator = false) => {
                 if (!roomCode || !myName) return alert("部屋コードと名前を入力してください");
 
                 const roomRef = window.fb.ref(window.fb.db, `rooms/${roomCode}`);
                 const playerRef = window.fb.ref(window.fb.db, `rooms/${roomCode}/players/${myName}`);
 
                 try {
-                    // 1. 最新のプレイヤーデータを取得して検問
-                    const snapshot = await window.fb.get(playerRef);
-                    const playerData = snapshot.val();
-
-                    // 2. 他のブラウザ（別UID）が既にその名前を使っている場合
-                    if (playerData && playerData.uid && playerData.uid !== myUid) {
-                        alert("汝は偽物なり。その名は既に別の騎士によって封印されている。");
-                        return; // ここで完全に終了し、画面は切り替えない
-                    }
-
-                    // 3. 部屋の状態を確認
+                    // 1. 部屋の状態を確認
                     const roomSnapshot = await window.fb.get(roomRef);
-                    const roomData = roomSnapshot.val();
+                    let roomData = roomSnapshot.val();
 
-                    // 4. 書き込みデータ作成
-                    const updates = {};
-                    updates[`players/${myName}/joined`] = true;
-                    updates[`players/${myName}/uid`] = myUid;
-
-                    if (!roomData || !roomData.host) {
-                        updates.host = myName;
-                        updates.hostUid = myUid;
+                    // 30分放置チェック
+                    if (roomData && roomData.lastActivity) {
+                        const now = Date.now();
+                        const diffMinutes = (now - roomData.lastActivity) / (1000 * 60);
+                        if (diffMinutes > 30) {
+                            await window.fb.remove(roomRef);
+                            roomData = null;
+                        }
                     }
-                    updates.lastActivity = Date.now();
 
-                    // 5. 【最重要】Firebaseへの書き込みが完了したことを「待つ」
-                    await window.fb.update(roomRef, updates);
+                    // 2. 観戦者かプレイヤーかで処理を分岐
+                    if (asSpectator) {
+                        // 【観戦者の場合】
+                        setIsSpectator(true);
+                        // 観戦者は参加人数に数えないため、Firebaseへのプレイヤー登録(update)は行わない
+                    } else {
+                        // 【プレイヤーの場合】
+                        setIsSpectator(false);
 
-                    // 6. 書き込みが成功したことが確認できてから、初めて入室を許可する
-                    localStorage.setItem('avalon_room', roomCode);
-                    localStorage.setItem('avalon_name', myName);
+                        // 既存のUIDチェック（なりすまし防止）
+                        const snapshot = await window.fb.get(playerRef);
+                        const playerData = snapshot.val();
+                        if (playerData && playerData.uid && playerData.uid !== myUid) {
+                            alert("汝は偽物なり。その名は既に別の騎士によって封印されている。");
+                            return;
+                        }
+
+                        // 試合開始後の新規参入ブロック
+                        if (roomData && roomData.started) {
+                            const isExistingPlayer = roomData.players && roomData.players[myName];
+                            if (!isExistingPlayer) {
+                                alert("聖戦は既に開始されています。新しい騎士が中に入ることは叶いません。");
+                                return;
+                            }
+                        }
+
+                        // プレイヤーとしてデータを書き込み
+                        const updates = {};
+                        updates[`players/${myName}/joined`] = true;
+                        updates[`players/${myName}/uid`] = myUid;
+                        if (!roomData || !roomData.host) {
+                            updates.host = myName;
+                            updates.hostUid = myUid;
+                        }
+                        updates.lastActivity = Date.now();
+                        await window.fb.update(roomRef, updates);
+                    }
+
+                    // 3. 共通の入室完了処理
+                    localStorage.setItem('camelot_room', roomCode);
+                    localStorage.setItem('camelot_name', myName);
                     setIsJoined(true);
 
                 } catch (error) {
@@ -845,49 +872,44 @@
             }, [gameState?.playerMap, myName]);
 
 
-            if (!isJoined) return (
-                <div className="flex flex-col items-center justify-center h-screen space-y-8 fade-in">
-                    <h1 className="text-6xl font-cinzel gold-text tracking-widest drop-shadow-lg">AVALON</h1>
-                    <div className="bg-dark-card p-8 rounded-lg gold-border w-80 space-y-4 shadow-2xl">
-                        <input className="w-full bg-black border border-gray-700 p-3 rounded" placeholder="ROOM CODE" value={roomCode} onChange={e => setRoomCode(e.target.value)} />
-                        <input className="w-full bg-black border border-gray-700 p-3 rounded" placeholder="YOUR NAME" value={myName} onChange={e => setMyName(e.target.value)} />
-                        <button onClick={joinGame} className="w-full btn-gold py-3 rounded hover:brightness-125 transition-all">ENTER GAME</button>
+            if (!isJoined) {
+                return (
+                    <div className="flex flex-col items-center justify-center h-screen space-y-8 fade-in bg-[#0d0d0f]">
+                        <h1 className="text-6xl font-cinzel gold-text tracking-widest drop-shadow-lg text-center">CAMELOT</h1>
+                        <div className="bg-dark-card p-8 rounded-lg gold-border w-80 space-y-4 shadow-2xl">
+                            <input className="w-full bg-black border border-gray-700 p-3 rounded text-[#e2d1a4]" placeholder="ROOM CODE" value={roomCode} onChange={e => setRoomCode(e.target.value)} />
+                            <input className="w-full bg-black border border-gray-700 p-3 rounded text-[#e2d1a4]" placeholder="YOUR NAME" value={myName} onChange={e => setMyName(e.target.value)} />
+
+                            <div className="space-y-2 pt-2">
+                                <button onClick={() => joinGame(false)} className="w-full btn-gold py-3 rounded hover:brightness-125 transition-all text-sm">
+                                    ENTER GAME
+                                </button>
+                                <button onClick={() => joinGame(true)} className="w-full bg-white/5 border border-white/20 py-2 rounded text-[10px] text-white/40 font-bold hover:bg-white/10 transition-all tracking-[0.2em] uppercase">
+                                    Watch as Spectator
+                                </button>
+                            </div>
+                        </div>
                     </div>
-                </div>
-            );
+                );
+            }
 
-
+            // 入室後のメイン画面
             return (
                 <div className="max-w-md mx-auto p-4 space-y-4 fade-in">
                     <header className="flex justify-between items-end border-b-2 border-[#c5a059]/50 pb-3 mb-6">
-                        <div className="flex flex-col">
-                            {/* サブタイトル：現在のルームを表示 */}
+                        <div className="flex flex-col text-left">
                             <span className="text-[10px] text-[#c5a059]/60 tracking-[0.2em] font-bold uppercase mb-1">
                                 Chamber: {roomCode || "Unknown"}
                             </span>
-                            {/* メインタイトル：Cinzelフォントの重厚感を強調 */}
                             <div className="flex items-center gap-2">
-                                <span className="text-xl font-cinzel gold-text tracking-widest leading-none">
-                                    AVALON
-                                </span>
-                                <span className="text-[10px] bg-[#c5a059]/10 text-[#c5a059] border border-[#c5a059]/30 px-1.5 py-0.5 rounded leading-none font-bold">
-                                    CMD
-                                </span>
+                                <span className="text-xl font-cinzel gold-text tracking-widest leading-none">CAMELOT</span>
+                                <span className="text-[10px] bg-[#c5a059]/10 text-[#c5a059] border border-[#c5a059]/30 px-1.5 py-0.5 rounded leading-none font-bold">CMD</span>
                             </div>
                         </div>
-
-                        {/* 操作系：RESETボタンを少し上品に */}
                         <div className="flex items-center gap-4">
-                            <button
-                                onClick={handleReset}
-                                className="group flex flex-col items-end gap-1 transition-all"
-                            >
-                                <span className="text-[9px] text-red-500/50 group-hover:text-red-500 uppercase tracking-tighter transition-colors">
-                                    Term. Session
-                                </span>
-                                <div className="px-3 py-1 border border-red-900/50 group-hover:border-red-600 rounded-sm bg-red-900/10 group-hover:bg-red-900/30 text-[10px] text-red-500 font-bold transition-all">
-                                    RESET
-                                </div>
+                            <button onClick={handleReset} className="group flex flex-col items-end gap-1 transition-all">
+                                <span className="text-[9px] text-red-500/50 group-hover:text-red-500 uppercase tracking-tighter transition-colors">Term. Session</span>
+                                <div className="px-3 py-1 border border-red-900/50 group-hover:border-red-600 rounded-sm bg-red-900/10 group-hover:bg-red-900/30 text-[10px] text-red-500 font-bold transition-all">RESET</div>
                             </button>
                         </div>
                     </header>
@@ -1159,7 +1181,7 @@
                                                     <div className="flex flex-wrap justify-center gap-1.5 opacity-70 scale-90">
                                                         {/* ホストが選んでいる役職をリアルタイム表示 */}
                                                         {(gameState?.selectedRoles || []).map((role, idx) => (
-                                                            <div key={idx} className={`px-1.5 py-0.5 border text-[7px] font-bold rounded-px animate-fadeIn ${['マーリン', 'パーシヴァル', '忠臣'].includes(role)
+                                                            <div key={idx} className={`px-1.5 py-0.5 border text-[7px] font-bold rounded-px animate-fadeIn ${['マーリン', 'パーシヴァル', '忠臣', 'ベイリン'].includes(role)
                                                                 ? 'border-blue-900/50 text-blue-400/80 bg-blue-900/10'
                                                                 : 'border-red-900/50 text-red-400/80 bg-red-900/10'
                                                                 }`}>
@@ -1209,6 +1231,28 @@
                         </div>
                     ) : (
                         <div className="space-y-4">
+                            {/* 観戦者専用 神視点パネル */}
+                            {isSpectator && gameState?.started && (
+                                <div className="bg-dark-card rounded-lg border-2 border-gold/50 p-4 shadow-[0_0_20px_rgba(197,160,89,0.3)] animate-fadeIn mb-4 relative overflow-hidden">
+                                    <div className="absolute top-2 right-4 opacity-10 pointer-events-none text-4xl">👁</div>
+                                    <h3 className="text-[10px] text-gold font-cinzel tracking-[0.3em] font-bold mb-3 border-b border-gold/20 pb-1 uppercase text-left">
+                                        Oracle View <span className="text-[8px] text-white/40 ml-1">― 神視点：全知の啓示</span>
+                                    </h3>
+                                    <div className="grid grid-cols-2 gap-2 text-left">
+                                        {Object.entries(gameState.playerMap || {}).map(([name, role]) => {
+                                            const isEvil = ['暗殺者', 'モルガナ', 'モードレッド', 'オベロン'].includes(role);
+                                            return (
+                                                <div key={name} className="flex justify-between items-center bg-black/40 p-2 border border-white/5 rounded-sm">
+                                                    <span className="text-[11px] text-gray-300 font-bold">{name}</span>
+                                                    <span className={`text-[9px] font-black tracking-widest px-1.5 py-0.5 rounded-px ${isEvil ? 'text-red-500 bg-red-950/20' : 'text-blue-400 bg-blue-950/20'}`}>
+                                                        {role}
+                                                    </span>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            )}
 
                             {/* 1. 聖なる刻印（役職・特殊情報） */}
                             <div className={`bg-dark-card rounded-lg border-2 shadow-[0_0_20px_rgba(0,0,0,0.5)] overflow-hidden mb-4 transition-all duration-1000 ${['暗殺者', 'モルガナ', 'モードレッド', 'オベロン'].includes(gameState.playerMap?.[myName])
@@ -1524,7 +1568,7 @@
                                             </p>
                                         </div>
 
-                                        {gameState.currentLeader === myName && (
+                                        {gameState.currentLeader === myName && !isSpectator && (
                                             <div className="space-y-5 animate-fadeIn">
                                                 <div className="flex flex-wrap gap-2 justify-center">
                                                     {gameState.playerList.map(p => {
@@ -1565,49 +1609,57 @@
                                         </div>
 
                                         {hasActioned ? (
+                                            /* すでに投票済みのプレイヤー、または投票が終わった後の表示 */
                                             <div className="py-6 bg-white/[0.02] rounded-sm border border-white/5 animate-pulse">
                                                 <p className="text-[10px] text-gold uppercase tracking-[0.3em] font-bold font-cinzel">Decision Archived</p>
                                                 <p className="text-[9px] text-gray-500 mt-1">他の騎士たちの決断を待っています...</p>
                                             </div>
                                         ) : (
-                                            <div className="flex flex-col gap-3">
-                                                {!voteConfirm ? (
-                                                    /* 承認・却下の初期選択 */
-                                                    <div className="flex gap-4">
-                                                        <button
-                                                            onClick={() => setVoteConfirm('yes')}
-                                                            className="flex-1 py-4 bg-green-950/20 border border-green-500/40 text-green-400 font-bold tracking-[0.2em] rounded-sm hover:bg-green-500/20 transition-all"
-                                                        >
-                                                            承 認
-                                                        </button>
-                                                        <button
-                                                            onClick={() => setVoteConfirm('no')}
-                                                            className="flex-1 py-4 bg-red-950/20 border border-red-500/40 text-red-400 font-bold tracking-[0.2em] rounded-sm hover:bg-red-500/20 transition-all"
-                                                        >
-                                                            却 下
-                                                        </button>
-                                                    </div>
-                                                ) : (
-                                                    /* 最終確認ステップ */
-                                                    <div className="p-5 bg-black/60 border border-gold/40 rounded-sm space-y-4 animate-revealIdentity">
-                                                        <p className="text-xs text-gold font-bold tracking-wider">
-                                                            【最終確認】 本当に <span className={voteConfirm === 'yes' ? "text-green-400" : "text-red-500"}>
-                                                                {voteConfirm === 'yes' ? '承認' : '却下'}
-                                                            </span> しますか？
-                                                        </p>
-                                                        <div className="flex gap-2 w-full">
-                                                            <button onClick={() => setVoteConfirm(null)} className="flex-1 py-2 bg-gray-800 text-[10px] text-gray-400 rounded-sm font-bold uppercase tracking-widest">キャンセル</button>
+                                            /* まだアクションしていない場合：観戦者かどうかで分岐 */
+                                            !isSpectator ? (
+                                                /* 【プレイヤーの場合】従来の投票UI */
+                                                <div className="flex flex-col gap-3">
+                                                    {!voteConfirm ? (
+                                                        <div className="flex gap-4">
                                                             <button
-                                                                onClick={() => castVote(voteConfirm)}
-                                                                className={`flex-1 py-2 text-[10px] text-white font-bold rounded-sm uppercase tracking-widest ${voteConfirm === 'yes' ? 'bg-green-700 shadow-[0_0_15px_rgba(34,197,94,0.3)]' : 'bg-red-800 shadow-[0_0_15px_rgba(220,38,38,0.3)]'
-                                                                    }`}
+                                                                onClick={() => setVoteConfirm('yes')}
+                                                                className="flex-1 py-4 bg-green-950/20 border border-green-500/40 text-green-400 font-bold tracking-[0.2em] rounded-sm hover:bg-green-500/20 transition-all"
                                                             >
-                                                                確定して送信
+                                                                承 認
+                                                            </button>
+                                                            <button
+                                                                onClick={() => setVoteConfirm('no')}
+                                                                className="flex-1 py-4 bg-red-950/20 border border-red-500/40 text-red-400 font-bold tracking-[0.2em] rounded-sm hover:bg-red-500/20 transition-all"
+                                                            >
+                                                                却 下
                                                             </button>
                                                         </div>
-                                                    </div>
-                                                )}
-                                            </div>
+                                                    ) : (
+                                                        <div className="p-5 bg-black/60 border border-gold/40 rounded-sm space-y-4 animate-revealIdentity">
+                                                            <p className="text-xs text-gold font-bold tracking-wider">
+                                                                【最終確認】 本当に <span className={voteConfirm === 'yes' ? "text-green-400" : "text-red-500"}>
+                                                                    {voteConfirm === 'yes' ? '承認' : '却下'}
+                                                                </span> しますか？
+                                                            </p>
+                                                            <div className="flex gap-2 w-full">
+                                                                <button onClick={() => setVoteConfirm(null)} className="flex-1 py-2 bg-gray-800 text-[10px] text-gray-400 rounded-sm font-bold uppercase tracking-widest">キャンセル</button>
+                                                                <button
+                                                                    onClick={() => castVote(voteConfirm)}
+                                                                    className={`flex-1 py-2 text-[10px] text-white font-bold rounded-sm uppercase tracking-widest ${voteConfirm === 'yes' ? 'bg-green-700 shadow-[0_0_15px_rgba(34,197,94,0.3)]' : 'bg-red-800 shadow-[0_0_15px_rgba(220,38,38,0.3)]'}`}
+                                                                >
+                                                                    確定して送信
+                                                                </button>
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ) : (
+                                                /* 【観戦者の場合】ボタンを表示せずメッセージのみ */
+                                                <div className="py-6 bg-white/[0.02] rounded-sm border border-white/5 text-center">
+                                                    <p className="text-[10px] text-gray-500 uppercase tracking-widest">Awaiting Player Decisions</p>
+                                                    <p className="text-[9px] text-gold/40 mt-1 italic">（観戦者は評決に参加できません）</p>
+                                                </div>
+                                            )
                                         )}
                                     </div>
                                 )}
@@ -1703,7 +1755,7 @@
                                                     </div>
                                                 </div>
 
-                                                {gameState.proposedTeam.includes(myName) ? (
+                                                {gameState.proposedTeam.includes(myName) && !isSpectator ? (
                                                     <div className="space-y-4 pt-4 border-t border-gray-800">
                                                         <p className="text-xs font-bold text-blue-400">
                                                             {hasActioned ? "意思表示を完了しました" : "あなたの運命を選択してください"}
